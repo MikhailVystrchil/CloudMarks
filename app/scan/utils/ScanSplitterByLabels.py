@@ -1,43 +1,73 @@
+from __future__ import annotations
+
+from collections import defaultdict
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.scan.Scan import Scan
 
 
 class ScanSplitterByLabels:
     """
-    Разделяет скан на подсканы по меткам (например, по DBSCAN-кластерам
-    или по классам направлений нормалей).
+    Разделяет Scan на подсканы по метке точки.
+
+    По умолчанию метка хранится в ``ScanPoint.labels``.
+    Метка DBSCAN ``-1`` считается шумом и исключается, если
+    ``include_noise=False``.
     """
 
-    def __init__(self, scan, label_attr="labels", include_noise=False, noise_label=-1):
+    def __init__(
+        self,
+        scan: Scan,
+        *,
+        label_attr: str = "labels",
+        include_noise: bool = False,
+        noise_label: int = -1,
+        copy_points: bool = False,
+    ) -> None:
         self.scan = scan
         self.label_attr = label_attr
         self.include_noise = include_noise
         self.noise_label = noise_label
+        self.copy_points = copy_points
 
-    def split(self):
-        labels_set = set()
-        for p in self.scan:
-            if not hasattr(p, self.label_attr):
+    def split(self) -> dict[int, Scan]:
+        """
+        Возвращает словарь ``{label: Scan}``.
+
+        Точки без атрибута `label_attr` игнорируются.
+        """
+        # Локальный импорт выполняется только после полной инициализации
+        # app.scan.Scan, поэтому циклического импорта нет.
+        from app.scan.Scan import Scan
+
+        points_by_label: dict[int, list] = defaultdict(list)
+
+        for point in self.scan:
+            if not hasattr(point, self.label_attr):
                 continue
-            lbl = getattr(p, self.label_attr)
-            if (lbl == self.noise_label) and (not self.include_noise):
+
+            label = int(
+                getattr(point, self.label_attr)
+            )
+
+            if (
+                label == self.noise_label
+                and not self.include_noise
+            ):
                 continue
-            labels_set.add(lbl)
 
-        label_to_scan = {}
-        for lbl in labels_set:
-            sub_scan = Scan(scan_name=f"{self.scan.name}_label_{lbl}")
-            label_to_scan[lbl] = sub_scan
+            points_by_label[label].append(point)
 
-        for p in self.scan:
-            if not hasattr(p, self.label_attr):
-                continue
-            lbl = getattr(p, self.label_attr)
-            if (lbl == self.noise_label) and (not self.include_noise):
-                continue
-            sub_scan = label_to_scan.get(lbl)
-            if sub_scan is not None:
-                sub_scan.add_point(p)
-
-        for sub_scan in label_to_scan.values():
-            sub_scan.borders = sub_scan._get_borders_dict(sub_scan._points)
-
-        return label_to_scan
+        return {
+            label: Scan.from_points(
+                scan_name=f"{self.scan.name}_label_{label}",
+                points=points,
+                copy_points=self.copy_points,
+                include_normals=True,
+                include_labels=True,
+            )
+            for label, points in sorted(
+                points_by_label.items()
+            )
+        }

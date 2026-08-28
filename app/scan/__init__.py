@@ -1,10 +1,10 @@
 """
-Сущности, обработчики и методы работы с облаками точек.
+Сущности и алгоритмы обработки облаков точек.
 """
 
-from .Scan import Scan
-from .ScanPlane import ScanPlane
-from .ScanPoint import ScanPoint
+from app.scan.Scan import Scan
+from app.scan.ScanPlane import ScanPlane
+from app.scan.ScanPoint import ScanPoint
 
 __all__ = [
     "Scan",

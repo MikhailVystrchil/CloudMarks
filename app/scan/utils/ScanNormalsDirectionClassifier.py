@@ -1,45 +1,137 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import numpy as np
 from sklearn.cluster import KMeans
 
+from CONFIG import RANDOM_SEED
+
+if TYPE_CHECKING:
+    from app.scan.Scan import Scan
+
 
 class ScanNormalsDirectionClassifier:
+    """
+    Классифицирует точки Scan по направлениям локальных нормалей.
+    """
 
-    def __init__(self, scan):
+    def __init__(
+        self,
+        scan: Scan,
+    ) -> None:
         self.scan = scan
 
-    def __scan_normals_to_numpy(self):
-        normals = []
-        for p in self.scan:
-            n = getattr(p, "normals", None)
-            if n is None:
-                raise AttributeError("У точки нет normals, сначала вызови scan.compute_normals()")
-            normals.append(n)
-        return np.array(normals, dtype=float)
+    def _normals_to_numpy(self) -> np.ndarray:
+        normals: list[np.ndarray] = []
+
+        for point in self.scan:
+            normal = point.normals
+
+            if normal is None:
+                raise AttributeError(
+                    "У точки отсутствует normals. "
+                    "Сначала вызовите scan.compute_normals()."
+                )
+
+            normal_array = np.asarray(
+                normal,
+                dtype=np.float64,
+            )
+
+            if normal_array.shape != (3,):
+                raise ValueError(
+                    "Нормаль каждой точки должна иметь форму (3,)."
+                )
+
+            normals.append(normal_array)
+
+        if not normals:
+            raise ValueError(
+                "Невозможно классифицировать нормали пустого Scan."
+            )
+
+        normal_array = np.asarray(
+            normals,
+            dtype=np.float64,
+        )
+
+        normal_lengths = np.linalg.norm(
+            normal_array,
+            axis=1,
+        )
+
+        if np.any(normal_lengths <= 1e-15):
+            raise ValueError(
+                "Обнаружена нулевая нормаль точки."
+            )
+
+        return normal_array / normal_lengths[:, np.newaxis]
 
     @staticmethod
-    def _unify_normals_hemisphere(normals):
-        n = normals / np.linalg.norm(normals, axis=1, keepdims=True)
-        ref = n.mean(axis=0)
-        ref_norm = np.linalg.norm(ref)
-        if ref_norm == 0:
-            ref = np.array([0.0, 0.0, 1.0])
-        else:
-            ref = ref / ref_norm
-        dots = n @ ref
-        mask = dots < 0
-        n[mask] = -n[mask]
-        return n
+    def _unify_normals_hemisphere(
+        normals: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Ориентирует нормали в одно полупространство перед KMeans.
 
-    def classify_normals(self, n_classes=3, unify_hemisphere=True):
-        normals = self.__scan_normals_to_numpy()
+        Направления ``n`` и ``-n`` задают одну плоскость, поэтому без
+        унификации KMeans может искусственно разделить одну поверхность.
+        """
+        normalized = normals.copy()
+
+        reference = normalized.mean(axis=0)
+        reference_norm = float(np.linalg.norm(reference))
+
+        if reference_norm <= 1e-15:
+            reference = np.asarray(
+                [0.0, 0.0, 1.0],
+                dtype=np.float64,
+            )
+        else:
+            reference = reference / reference_norm
+
+        negative_mask = normalized @ reference < 0.0
+        normalized[negative_mask] *= -1.0
+
+        return normalized
+
+    def classify_normals(
+        self,
+        *,
+        n_classes: int = 3,
+        unify_hemisphere: bool = True,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Выполняет KMeans-классификацию направлений нормалей.
+
+        Возвращает:
+        - labels: метки каждой точки;
+        - centers: центры классов в пространстве направлений.
+        """
+        if n_classes < 1:
+            raise ValueError(
+                "n_classes должен быть положительным."
+            )
+
+        if len(self.scan) < n_classes:
+            raise ValueError(
+                "Количество точек Scan должно быть не меньше n_classes."
+            )
+
+        normals = self._normals_to_numpy()
+
         if unify_hemisphere:
             normals = self._unify_normals_hemisphere(normals)
-        normals = normals / np.linalg.norm(normals, axis=1, keepdims=True)
 
-        kmeans = KMeans(n_clusters=n_classes, n_init=10, random_state=0)
+        kmeans = KMeans(
+            n_clusters=n_classes,
+            n_init=10,
+            random_state=RANDOM_SEED,
+        )
         labels = kmeans.fit_predict(normals)
 
-        for p, lbl in zip(self.scan, labels):
-            setattr(p, "labels", int(lbl))
+        for point, label in zip(self.scan, labels):
+            point.labels = int(label)
 
         return labels, kmeans.cluster_centers_

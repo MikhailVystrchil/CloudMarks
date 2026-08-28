@@ -1,12 +1,5 @@
 """
-Пакетная обработка пары крупных разновременных облаков точек.
-
-Компоненты пакета позволяют:
-- считывать список опорных точек;
-- выделять локальные сферические окрестности через cKDTree;
-- получать виртуальные точки в обеих эпохах;
-- контролировать качество геометрии;
-- рассчитывать смещения и экспортировать результаты.
+Пакетная обработка двух зарегистрированных разновременных облаков точек.
 """
 
 from app.batch.PointPairComparisonRunner import (
@@ -14,7 +7,9 @@ from app.batch.PointPairComparisonRunner import (
     ReferencePointProcessingResult,
 )
 from app.batch.ReferencePoint import ReferencePoint
-from app.batch.ReferencePointReader import ReferencePointReader
+from app.batch.ReferencePointReader import (
+    ReferencePointReader,
+)
 from app.batch.ScanNeighborhoodExtractor import (
     ScanNeighborhoodExtractor,
 )

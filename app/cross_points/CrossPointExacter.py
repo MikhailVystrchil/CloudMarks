@@ -10,7 +10,6 @@ from sklearn.cluster import DBSCAN
 from app.cross_points.CrossPoint import CrossPoint
 from app.scan.Scan import Scan
 from app.scan.ScanPlane import ScanPlane
-from app.scan.ScanPoint import ScanPoint
 from app.scan.plane_fitters.IterativePlaneFitter import IterativePlaneFitter
 from app.scan.plane_fitters.PlaneL1Fitter import PlaneL1Fitter
 from app.scan.utils.ScanNormalsDirectionClassifier import (
@@ -370,30 +369,14 @@ class CrossPointExacter:
         return selected_scans
 
     def _select_component(
-        self,
-        normal_scan: Scan,
-        plane_index: int,
+            self,
+            normal_scan: Scan,
+            plane_index: int,
     ) -> Scan:
         """
-        Выбирает компоненту класса нормалей.
-
-        При наличии reference_xyz:
-        - DBSCAN делит класс на пространственные компоненты;
-        - выбирается компонента с минимальным расстоянием до опорной точки;
-        - если DBSCAN не сформировал компоненту достаточного размера,
-          выбираются ближайшие к опорной точке точки исходного класса.
-
-        При отсутствии reference_xyz:
-        - выбирается крупнейшая пространственная компонента;
-        - при неудаче DBSCAN используется весь класс нормалей.
+        Выбирает пространственную компоненту класса нормалей.
         """
-        xyz = np.asarray(
-            [
-                [point.x, point.y, point.z]
-                for point in normal_scan
-            ],
-            dtype=np.float64,
-        )
+        xyz = normal_scan.to_numpy()
 
         if len(xyz) < self.min_points_per_plane:
             return normal_scan
@@ -408,9 +391,11 @@ class CrossPointExacter:
         candidate_labels = [
             int(label)
             for label in unique_labels
-            if label != -1
-            and int(np.count_nonzero(dbscan_labels == label))
-            >= self.min_points_per_plane
+            if (
+                    label != -1
+                    and np.count_nonzero(dbscan_labels == label)
+                    >= self.min_points_per_plane
+            )
         ]
 
         if not candidate_labels:
@@ -420,6 +405,7 @@ class CrossPointExacter:
                 plane_index,
                 self.min_points_per_plane,
             )
+
             return self._fallback_component(
                 normal_scan=normal_scan,
                 xyz=xyz,
@@ -430,7 +416,9 @@ class CrossPointExacter:
             selected_label = max(
                 candidate_labels,
                 key=lambda label: int(
-                    np.count_nonzero(dbscan_labels == label)
+                    np.count_nonzero(
+                        dbscan_labels == label
+                    )
                 ),
             )
         else:
@@ -452,8 +440,7 @@ class CrossPointExacter:
         )
 
         logger.debug(
-            "Плоскость {}: DBSCAN-компонента {}, "
-            "точек={}",
+            "Плоскость {}: DBSCAN-компонента {}, точек={}",
             plane_index,
             selected_label,
             len(selected_indices),
@@ -462,20 +449,19 @@ class CrossPointExacter:
         return self._build_scan_from_indices(
             source_scan=normal_scan,
             indices=selected_indices,
-            suffix=f"plane_{plane_index}_cluster_{selected_label}",
+            suffix=(
+                f"plane_{plane_index}_cluster_{selected_label}"
+            ),
         )
 
     def _fallback_component(
-        self,
-        normal_scan: Scan,
-        xyz: np.ndarray,
-        plane_index: int,
+            self,
+            normal_scan: Scan,
+            xyz: np.ndarray,
+            plane_index: int,
     ) -> Scan:
         """
-        Безопасный fallback.
-
-        Для опорной точки выбирается ближайшая часть класса нормалей,
-        но никогда не выбирается меньше min_points_per_plane.
+        Запасная стратегия выбора пространственно близкой части класса.
         """
         if self.reference_xyz is None:
             logger.debug(
@@ -483,6 +469,7 @@ class CrossPointExacter:
                 "без reference_xyz.",
                 plane_index,
             )
+
             return normal_scan
 
         distances = np.linalg.norm(
@@ -498,7 +485,9 @@ class CrossPointExacter:
             ),
         )
 
-        selected_indices = np.argsort(distances)[:selected_count]
+        selected_indices = np.argsort(
+            distances
+        )[:selected_count]
 
         logger.debug(
             "Плоскость {}: fallback ближайших точек, "
@@ -516,34 +505,23 @@ class CrossPointExacter:
 
     @staticmethod
     def _build_scan_from_indices(
-        source_scan: Scan,
-        indices: np.ndarray,
-        suffix: str,
+            source_scan: Scan,
+            indices: np.ndarray,
+            suffix: str,
     ) -> Scan:
         """
-        Создаёт независимый Scan, чтобы последующие операции очистки
-        не меняли исходное локальное облако.
+        Формирует независимый подскан по индексам.
+
+        Логика копирования точек централизована в ``Scan.subset()``,
+        поэтому нормали, цвета и метки не теряются и не изменяют исходный Scan.
         """
-        selected_scan = Scan(
-            scan_name=f"{source_scan.name}__{suffix}"
+        return source_scan.subset(
+            indices=np.asarray(indices, dtype=np.intp),
+            scan_name=f"{source_scan.name}__{suffix}",
+            copy_points=True,
+            include_normals=True,
+            include_labels=True,
         )
-
-        source_points = list(source_scan)
-
-        for index in np.asarray(indices, dtype=np.intp):
-            point = source_points[int(index)]
-
-            selected_scan.add_point(
-                ScanPoint(
-                    x=float(point.x),
-                    y=float(point.y),
-                    z=float(point.z),
-                    color=getattr(point, "color", (0, 0, 0)),
-                    normals=getattr(point, "normals", None),
-                )
-            )
-
-        return selected_scan
 
     def calculate_planes(
         self,

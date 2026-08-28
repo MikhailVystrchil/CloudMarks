@@ -150,7 +150,7 @@ def main() -> None:
     configure_logger()
 
     # Замените путь и, если необходимо, DBSCAN-метки на параметры вашего опыта.
-    input_file = Path("data") / "1_A_10_2_l.txt"
+    input_file = Path("data") / "t1" / "1_A_10_2_l.txt"
 
     try:
         extract_virtual_point(

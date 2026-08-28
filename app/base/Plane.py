@@ -1,61 +1,122 @@
+from __future__ import annotations
+
 import numpy as np
 
 
 class Plane:
     """
-    Плоскость Ax + By + Cz + D = 0.
-    Хранит коэффициенты, нормаль, точку на плоскости и inliers.
+    Плоскость вида:
+
+    Ax + By + Cz + D = 0.
+
+    Нормаль хранится в нормированном виде. Поэтому модуль невязки точки
+    является её ортогональным расстоянием до плоскости.
     """
 
-    def __init__(self, normal, point_on_plane, d):
-        """
-        normal          – np.ndarray shape (3,), единичная нормаль (A,B,C)
-        point_on_plane  – np.ndarray shape (3,), любая точка на плоскости
-        d               – скаляр D в уравнении Ax+By+Cz + D = 0
-        """
-        self.normal = normal.astype(float)
-        self.point = point_on_plane.astype(float)
-        self.d = float(d)
+    def __init__(
+        self,
+        normal: np.ndarray,
+        point_on_plane: np.ndarray,
+        d: float,
+    ) -> None:
+        normal_array = np.asarray(normal, dtype=np.float64)
+
+        if normal_array.shape != (3,):
+            raise ValueError(
+                "normal должен быть массивом формы (3,)."
+            )
+
+        normal_norm = float(np.linalg.norm(normal_array))
+
+        if normal_norm <= 1e-15:
+            raise ValueError("Нормаль плоскости не может быть нулевой.")
+
+        self.normal = normal_array / normal_norm
+        self.point = np.asarray(
+            point_on_plane,
+            dtype=np.float64,
+        )
+
+        if self.point.shape != (3,):
+            raise ValueError(
+                "point_on_plane должен быть массивом формы (3,)."
+            )
+
+        self.d = float(d) / normal_norm
 
     @property
-    def A(self):
-        return self.normal[0]
+    def A(self) -> float:
+        return float(self.normal[0])
 
     @property
-    def B(self):
-        return self.normal[1]
+    def B(self) -> float:
+        return float(self.normal[1])
 
     @property
-    def C(self):
-        return self.normal[2]
+    def C(self) -> float:
+        return float(self.normal[2])
 
     @property
-    def D(self):
+    def D(self) -> float:
         return self.d
 
     @property
-    def equation(self):
-        """Коэффициенты (A,B,C,D)."""
-        return self.A, self.B, self.C, self.d
+    def equation(self) -> tuple[float, float, float, float]:
+        """
+        Коэффициенты уравнения плоскости: ``(A, B, C, D)``.
+        """
+        return self.A, self.B, self.C, self.D
 
-    def distance_to_point(self, xyz):
+    def distance_to_point(
+        self,
+        xyz: np.ndarray,
+    ) -> np.ndarray:
         """
-        xyz: np.ndarray shape (3,) или (N,3).
-        Возвращает расстояние(я) от точки(точек) до плоскости.
-        """
-        xyz = np.asarray(xyz, dtype=float)
-        num = np.dot(xyz, self.normal) + self.d
-        return np.abs(num)  # нормаль единичная → делить на ||n|| не нужно
+        Возвращает ортогональное расстояние от одной точки или массива точек.
 
-    def project_point(self, xyz):
+        Parameters
+        ----------
+        xyz:
+            Массив формы ``(3,)`` или ``(N, 3)``.
         """
-        Проекция точки(точек) на плоскость.
-        xyz: (3,) или (N,3).
-        """
-        xyz = np.asarray(xyz, dtype=float)
-        dist = np.dot(xyz - self.point, self.normal)
-        return xyz - np.outer(dist, self.normal)
+        coordinates = np.asarray(xyz, dtype=np.float64)
 
-    def __repr__(self):
-        A, B, C, D = self.equation
-        return f"{self.__class__.__name__} (A={A:.6f}, B={B:.6f}, C={C:.6f}, D={D:.6f})"
+        if coordinates.shape[-1] != 3:
+            raise ValueError(
+                "Координаты должны иметь последнюю размерность 3."
+            )
+
+        residuals = np.dot(coordinates, self.normal) + self.d
+        return np.abs(residuals)
+
+    def project_point(
+        self,
+        xyz: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Проецирует точку или массив точек на плоскость.
+        """
+        coordinates = np.asarray(xyz, dtype=np.float64)
+
+        if coordinates.shape[-1] != 3:
+            raise ValueError(
+                "Координаты должны иметь последнюю размерность 3."
+            )
+
+        signed_distance = np.dot(
+            coordinates - self.point,
+            self.normal,
+        )
+
+        return coordinates - np.expand_dims(
+            signed_distance,
+            axis=-1,
+        ) * self.normal
+
+    def __repr__(self) -> str:
+        a, b, c, d = self.equation
+
+        return (
+            f"{self.__class__.__name__} "
+            f"(A={a:.6f}, B={b:.6f}, C={c:.6f}, D={d:.6f})"
+        )

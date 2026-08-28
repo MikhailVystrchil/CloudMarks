@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -6,15 +8,29 @@ from app.scan.Scan import Scan
 
 
 class PlaneFitterABC(ABC):
+    """
+    Абстрактный интерфейс аппроксимации плоскости по Scan.
+    """
 
-    def __init__(self, scan: Scan):
+    def __init__(
+        self,
+        scan: Scan,
+    ) -> None:
         self.scan = scan
 
-    def _scan_to_numpy(self):
-        """Все точки скана в np.ndarray (N,3)."""
-        pts = np.array([[p.x, p.y, p.z] for p in self.scan], dtype=float)
-        return pts
+    def _scan_to_numpy(self) -> np.ndarray:
+        """
+        Координаты точек скана как массив формы ``(N, 3)``.
+        """
+        return self.scan.to_numpy()
 
     @abstractmethod
-    def fit_plane(self, *args, **kwargs):
-        pass
+    def fit_plane(
+        self,
+        *args,
+        **kwargs,
+    ):
+        """
+        Аппроксимирует плоскость по ``self.scan``.
+        """
+        raise NotImplementedError
