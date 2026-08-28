@@ -1,2 +1,7 @@
 
 .idea/
+/data/
+
+app/base/__pycache__/
+
+__pycache__/
