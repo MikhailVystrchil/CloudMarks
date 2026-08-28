@@ -1,18 +1,16 @@
 import os
-import logging
 
 import numpy as np
+from loguru import logger
 
 from app.scan.Scan import Scan
 from app.scan.ScanPlane import ScanPlane
-from app.scan.filters.ScanFilterByDBSCAN import ScanFilterByDBSCAN
 from app.scan.plane_fitters.IterativePlaneFitter import IterativePlaneFitter
 from app.scan.plane_fitters.PlaneL1Fitter import PlaneL1Fitter
 from app.scan.utils.ScanNormalsDirectionClassifier import ScanNormalsDirectionClassifier
 from app.scan.utils.ScanSplitterByLabels import ScanSplitterByLabels
 from app.cross_points.CrossPoint import CrossPoint
 
-logger = logging.getLogger(__name__)
 
 COND_THRESHOLD = 1_000.0
 PARALLEL_ANGLE_TOL = np.deg2rad(10.0)
@@ -27,60 +25,107 @@ class PlaneGeometryStatus:
 
 class PlaneGeometryDiagnostics:
     """
-    Проверка устойчивости геометрии трёх плоскостей перед вычислением
-    точки пересечения: вырожденность, близость к параллельности,
-    плохая обусловленность матрицы нормалей.
+    Результат проверки устойчивости пересечения трёх плоскостей.
+
+    Проверяются:
+    - вырожденность матрицы нормалей;
+    - наличие почти параллельных плоскостей;
+    - число обусловленности матрицы нормалей.
     """
 
-    def __init__(self, planes, cond_threshold: float = COND_THRESHOLD,
-                 angle_tol_rad: float = PARALLEL_ANGLE_TOL):
+    def __init__(
+        self,
+        planes,
+        cond_threshold: float = COND_THRESHOLD,
+        angle_tol_rad: float = PARALLEL_ANGLE_TOL,
+    ):
+        if planes is None or len(planes) != 3:
+            raise ValueError(
+                "Для диагностики геометрии необходимы ровно три плоскости."
+            )
+
         self.cond_threshold = cond_threshold
         self.angle_tol_rad = angle_tol_rad
 
-        self.N = np.array([[p.A, p.B, p.C] for p in planes], dtype=float)
+        self.N = np.array(
+            [[plane.A, plane.B, plane.C] for plane in planes],
+            dtype=float,
+        )
         self.det = float(np.linalg.det(self.N))
-        _, s, _ = np.linalg.svd(self.N)
-        self.singular_values = s
-        self.cond = float(s[0] / s[-1]) if s[-1] > 1e-15 else float("inf")
+
+        _, singular_values, _ = np.linalg.svd(self.N)
+        self.singular_values = singular_values
+        self.cond = (
+            float(singular_values[0] / singular_values[-1])
+            if singular_values[-1] > 1e-15
+            else float("inf")
+        )
+
         self.has_parallel = self._check_parallel(planes)
         self.messages: list[str] = []
         self.status = self._evaluate()
 
     def _check_parallel(self, planes) -> bool:
-        normals = np.array([p.normal for p in planes], dtype=float)
+        normals = np.array(
+            [plane.normal for plane in planes],
+            dtype=float,
+        )
         norms = np.linalg.norm(normals, axis=1, keepdims=True)
         normals = normals / np.where(norms > 1e-15, norms, 1.0)
-        cos_tol = np.cos(self.angle_tol_rad)
-        n = len(normals)
 
-        for i in range(n):
-            for j in range(i + 1, n):
-                if abs(np.dot(normals[i], normals[j])) >= cos_tol:
+        cos_tolerance = np.cos(self.angle_tol_rad)
+
+        for i in range(len(normals)):
+            for j in range(i + 1, len(normals)):
+                cosine = abs(float(np.dot(normals[i], normals[j])))
+                angle_deg = np.rad2deg(
+                    np.arccos(np.clip(cosine, -1.0, 1.0))
+                )
+
+                logger.debug(
+                    "Угол между нормалями плоскостей {} и {}: {:.3f}°",
+                    i + 1,
+                    j + 1,
+                    angle_deg,
+                )
+
+                if cosine >= cos_tolerance:
                     return True
+
         return False
 
     def _evaluate(self) -> str:
         if abs(self.det) < 1e-10:
-            self.messages.append(f"det(N)={self.det:.3e} — матрица нормалей вырождена")
+            self.messages.append(
+                f"det(N)={self.det:.3e}: матрица нормалей вырождена"
+            )
             return PlaneGeometryStatus.SINGULAR
 
         if self.has_parallel:
             self.messages.append(
-                f"Обнаружены почти параллельные плоскости (допуск {np.rad2deg(self.angle_tol_rad):.1f}°)")
+                "Обнаружены почти параллельные плоскости "
+                f"(допуск {np.rad2deg(self.angle_tol_rad):.1f}°)"
+            )
             return PlaneGeometryStatus.PARALLEL
 
         if self.cond > self.cond_threshold:
-            self.messages.append(f"cond(N)={self.cond:.1f} > {self.cond_threshold:.0f} — геометрия плохо обусловлена")
+            self.messages.append(
+                f"cond(N)={self.cond:.1f} > {self.cond_threshold:.0f}: "
+                "геометрия плохо обусловлена"
+            )
             return PlaneGeometryStatus.ILL_CONDITIONED
 
-        self.messages.append(f"det(N)={self.det:.4f}, cond(N)={self.cond:.1f} — геометрия устойчива")
+        self.messages.append(
+            f"det(N)={self.det:.4f}, cond(N)={self.cond:.1f}: "
+            "геометрия устойчива"
+        )
         return PlaneGeometryStatus.GOOD
 
     @property
     def is_reliable(self) -> bool:
         return self.status == PlaneGeometryStatus.GOOD
 
-    def __str__(self):
+    def __str__(self) -> str:
         lines = [
             "PlaneGeometryDiagnostics:",
             f"  status          = {self.status}",
@@ -89,163 +134,413 @@ class PlaneGeometryDiagnostics:
             f"  singular_values = {self.singular_values}",
             f"  has_parallel    = {self.has_parallel}",
         ]
-        for msg in self.messages:
-            lines.append(f"  [!] {msg}")
+        lines.extend(f"  [!] {message}" for message in self.messages)
         return "\n".join(lines)
 
 
 class CrossPointExacter:
     """
-    Реализация ядра метода: локальная сегментация трёх плоскостей вокруг
-    заданной окрестности, аппроксимация каждой плоскости, вычисление точки
-    пересечения и перенос ковариаций параметров плоскостей на координаты
-    виртуальной точки.
+    Вычисляет виртуальную точку как пересечение трёх плоскостей,
+    выделенных из локального облака точек.
+
+    Последовательность:
+    1. Загрузка локального облака;
+    2. Вычисление нормалей;
+    3. Классификация нормалей KMeans на три направления;
+    4. Разделение облака на три подскана;
+    5. Робастная очистка выбросов и МНК-аппроксимация плоскостей;
+    6. Контроль геометрии пересечения;
+    7. Решение СЛАУ и перенос ковариаций на виртуальную точку.
+
+    DBSCAN намеренно не используется: пространственную очистку выбросов
+    выполняет IterativePlaneFitter, что не исключает малые, но геометрически
+    значимые локальные фрагменты плоскостей.
     """
 
-    def __init__(self, file_path: str, choose_scan_directly_from_dbscan: bool = True,
-                 show_scans=True, labels=None, eps=0.01):
+    def __init__(
+        self,
+        file_path: str,
+        show_scans: bool = False,
+    ):
+        self.file_path = file_path
+
+        logger.info("Инициализация извлекателя виртуальной точки")
+        logger.info("Файл локального облака: {}", file_path)
+
         self.base_scan = self.__init_scan(file_path)
-        self.choose_scan_directly_from_dbscan = choose_scan_directly_from_dbscan
-        self.plane_scans = self.__separate_plane_scans(show_scans=show_scans, labels=labels, eps=eps)
-        self.planes = None
-        self.cross_point = None
+        self.plane_scans = self.__separate_plane_scans(
+            show_scans=show_scans,
+        )
+
+        self.planes: list[ScanPlane] | None = None
+        self.cross_point: CrossPoint | None = None
         self.geometry_diagnostics: PlaneGeometryDiagnostics | None = None
 
     @staticmethod
-    def __init_scan(file_path: str):
-        scan_name = os.path.basename(file_path).split(".")[0]
+    def __init_scan(file_path: str) -> Scan:
+        scan_name = os.path.basename(file_path).rsplit(".", maxsplit=1)[0]
         scan = Scan(scan_name)
-        scan.import_points_from_file(file_path)
+
+        logger.info("Загрузка исходного облака точек")
+        scan.import_points_from_file(file_path, compute_normals=False)
+        logger.info("Исходное облако загружено: {} точек", len(scan))
+
+        logger.info("Вычисление локальных нормалей: k=8")
         scan.compute_normals(k=8)
-        s_normals_c = ScanNormalsDirectionClassifier(scan)
-        s_normals_c.classify_normals(n_classes=3, unify_hemisphere=True)
+
+        logger.info("Классификация нормалей на 3 направления")
+        normals_classifier = ScanNormalsDirectionClassifier(scan)
+        labels, _ = normals_classifier.classify_normals(
+            n_classes=3,
+            unify_hemisphere=True,
+        )
+
+        unique_labels, counts = np.unique(labels, return_counts=True)
+        label_counts = {
+            int(label): int(count)
+            for label, count in zip(unique_labels, counts)
+        }
+
+        logger.info(
+            "Классификация направлений нормалей завершена: {}",
+            label_counts,
+        )
+
         return scan
 
-    def __separate_plane_scans(self, show_scans, eps, labels=None):
-        def choose_plane_scan(scan, label=None, eps=eps, min_samples=5, min_cluster_size=100):
-            scan.filter_scan(filter_cls=ScanFilterByDBSCAN, eps=eps,
-                             min_samples=min_samples, min_cluster_size=min_cluster_size)
-            if show_scans:
-                scan.plot()
-            scans = ScanSplitterByLabels(scan).split()
-            if not scans:
-                raise ValueError(f"После DBSCAN не осталось кластеров в скане '{scan.name}'")
-            if label is None:
-                label = max(scans, key=lambda lbl: len(list(scans[lbl])))
-                logger.debug("Авто-выбор кластера %s для скана '%s'", label, scan.name)
-            if label not in scans:
-                raise KeyError(f"Кластер {label} не найден в скане '{scan.name}'. Доступные: {sorted(scans.keys())}")
-            return scans[label]
+    def __separate_plane_scans(
+        self,
+        show_scans: bool,
+    ) -> list[Scan]:
+        """
+        Разделяет точки на три локальных подскана по классам нормалей.
 
-        scans = ScanSplitterByLabels(self.base_scan).split()
-        plane_scan = []
-        for idx, scan in enumerate(scans.values()):
-            label = labels[idx] if labels is not None else None
-            if self.choose_scan_directly_from_dbscan:
-                scan = choose_plane_scan(scan, label=label)
-            plane_scan.append(scan)
-            if show_scans:
-                scan.plot()
-        return plane_scan
+        Пространственная фильтрация DBSCAN не выполняется. Все точки каждого
+        класса передаются IterativePlaneFitter, который очищает выбросы по
+        расстоянию до робастно оценённой плоскости.
+        """
+        normal_scans = ScanSplitterByLabels(self.base_scan).split()
 
-    def calculate_planes(self, base_fitter=PlaneL1Fitter, mse_threshold=0.0001,
-                         max_iteration=20, k_sigma=2):
-        scan_planes = []
-        for scan in self.plane_scans:
-            scan_plane = ScanPlane.fit_plane_to_scan(
-                scan=scan, fitter=IterativePlaneFitter, base_fitter=base_fitter,
-                mse_threshold=mse_threshold, max_iteration=max_iteration, k_sigma=k_sigma,
+        if len(normal_scans) != 3:
+            raise ValueError(
+                "После классификации нормалей должно быть выделено три класса. "
+                f"Фактически выделено: {len(normal_scans)}."
             )
+
+        normal_classes_sizes = {
+            int(class_label): len(class_scan)
+            for class_label, class_scan in normal_scans.items()
+        }
+
+        logger.info(
+            "Выделено классов направлений нормалей: {}. Размеры: {}",
+            len(normal_scans),
+            normal_classes_sizes,
+        )
+
+        plane_scans: list[Scan] = []
+
+        for index, (normal_label, scan) in enumerate(
+            normal_scans.items(),
+            start=1,
+        ):
+            if len(scan) < 6:
+                raise ValueError(
+                    f"Для плоскости {index} выделено недостаточно точек: "
+                    f"{len(scan)}. Необходимо не менее 6."
+                )
+
+            logger.info(
+                "Плоскость {}/3: класс нормалей {}, {} точек. "
+                "DBSCAN не применяется.",
+                index,
+                normal_label,
+                len(scan),
+            )
+
+            if show_scans:
+                scan.plot()
+
+            plane_scans.append(scan)
+
+        logger.success(
+            "Локальные фрагменты трёх плоскостей подготовлены: {}",
+            [len(scan) for scan in plane_scans],
+        )
+
+        return plane_scans
+
+    def calculate_planes(
+        self,
+        base_fitter=PlaneL1Fitter,
+        mse_threshold: float = 0.0001,
+        max_iteration: int = 20,
+        k_sigma: float = 2,
+    ) -> list[ScanPlane]:
+        logger.info(
+            "Аппроксимация трёх плоскостей: mse_threshold={}, "
+            "max_iteration={}, k_sigma={}",
+            mse_threshold,
+            max_iteration,
+            k_sigma,
+        )
+
+        scan_planes: list[ScanPlane] = []
+
+        for index, scan in enumerate(self.plane_scans, start=1):
+            logger.info(
+                "Построение плоскости {}/3 по {} точкам",
+                index,
+                len(scan),
+            )
+
+            scan_plane = ScanPlane.fit_plane_to_scan(
+                scan=scan,
+                fitter=IterativePlaneFitter,
+                base_fitter=base_fitter,
+                mse_threshold=mse_threshold,
+                max_iteration=max_iteration,
+                k_sigma=k_sigma,
+            )
+
             scan_planes.append(scan_plane)
+
+            logger.success(
+                "Плоскость {}/3 построена: inliers={}, RMSE={:.6f}, "
+                "A={:.6f}, B={:.6f}, C={:.6f}, D={:.6f}",
+                index,
+                len(scan_plane.scan),
+                scan_plane.mse,
+                scan_plane.A,
+                scan_plane.B,
+                scan_plane.C,
+                scan_plane.D,
+            )
+
         self.planes = scan_planes
         return scan_planes
 
-    def diagnose_geometry(self, cond_threshold: float = COND_THRESHOLD,
-                          angle_tol_rad: float = PARALLEL_ANGLE_TOL) -> PlaneGeometryDiagnostics:
-        diag = PlaneGeometryDiagnostics(self.planes, cond_threshold=cond_threshold, angle_tol_rad=angle_tol_rad)
-        self.geometry_diagnostics = diag
-        logger.info("PlaneGeometryDiagnostics | %s | det=%.4f | cond=%.1f", diag.status, diag.det, diag.cond)
-        return diag
+    def diagnose_geometry(
+        self,
+        cond_threshold: float = COND_THRESHOLD,
+        angle_tol_rad: float = PARALLEL_ANGLE_TOL,
+    ) -> PlaneGeometryDiagnostics:
+        if self.planes is None:
+            raise RuntimeError(
+                "Плоскости ещё не вычислены. Сначала вызовите calculate_planes()."
+            )
+
+        logger.info(
+            "Диагностика геометрии: cond_threshold={}, "
+            "минимальный угол={:.2f}°",
+            cond_threshold,
+            np.rad2deg(angle_tol_rad),
+        )
+
+        diagnostics = PlaneGeometryDiagnostics(
+            self.planes,
+            cond_threshold=cond_threshold,
+            angle_tol_rad=angle_tol_rad,
+        )
+        self.geometry_diagnostics = diagnostics
+
+        if diagnostics.is_reliable:
+            logger.success(
+                "Геометрия устойчива: det(N)={:.6f}, cond(N)={:.2f}",
+                diagnostics.det,
+                diagnostics.cond,
+            )
+        else:
+            logger.warning(
+                "Геометрия неустойчива: status={}, det(N)={:.6f}, "
+                "cond(N)={:.2f}; {}",
+                diagnostics.status,
+                diagnostics.det,
+                diagnostics.cond,
+                "; ".join(diagnostics.messages),
+            )
+
+        return diagnostics
 
     @staticmethod
     def _fallback_cov_from_mse(plane: ScanPlane) -> np.ndarray:
+        """
+        Консервативная запасная оценка ковариации, используемая только
+        в случае отсутствия ковариации параметров плоскости.
+        """
         sigma2 = float(plane.mse ** 2)
         return np.eye(4, dtype=float) * sigma2
 
     @staticmethod
-    def _propagate_covariance(planes) -> np.ndarray:
+    def _propagate_covariance(planes: list[ScanPlane]) -> np.ndarray:
         """
         Перенос ковариаций параметров трёх плоскостей на координаты
-        виртуальной точки пересечения через якобиан решения СЛАУ (метод
-        линеаризации, описанный в статье).
+        виртуальной точки по формуле первого порядка:
+
+            K_X = J K_p J^T.
+
+        В рамках локальной модели K_p принимается блочно-диагональной:
+        параметры плоскостей рассматриваются как независимые.
         """
-        N_mat = np.array([[p.A, p.B, p.C] for p in planes], dtype=float)
-        d_vec = np.array([p.D for p in planes], dtype=float)
+        normal_matrix = np.array(
+            [[plane.A, plane.B, plane.C] for plane in planes],
+            dtype=float,
+        )
+        d_vector = np.array(
+            [plane.D for plane in planes],
+            dtype=float,
+        )
 
-        xyz = np.linalg.solve(N_mat, -d_vec)
-        X, Y, Z = xyz
-        M = np.linalg.inv(N_mat)
+        xyz = np.linalg.solve(normal_matrix, -d_vector)
+        x_coord, y_coord, z_coord = xyz
+        normal_matrix_inv = np.linalg.inv(normal_matrix)
 
-        Sigma_p = np.zeros((12, 12), dtype=float)
-        for i, plane in enumerate(planes):
-            cov_i = (plane.cov_params if getattr(plane, "cov_params", None) is not None
-                     else CrossPointExacter._fallback_cov_from_mse(plane))
-            Sigma_p[4 * i:4 * i + 4, 4 * i:4 * i + 4] = cov_i
+        covariance_params = np.zeros((12, 12), dtype=float)
 
-        J = np.zeros((3, 12), dtype=float)
-        for i in range(3):
-            col = M[:, i]
-            j0 = 4 * i
-            J[:, j0 + 0] = -X * col
-            J[:, j0 + 1] = -Y * col
-            J[:, j0 + 2] = -Z * col
-            J[:, j0 + 3] = -col
+        for plane_index, plane in enumerate(planes):
+            covariance = (
+                plane.cov_params
+                if getattr(plane, "cov_params", None) is not None
+                else CrossPointExacter._fallback_cov_from_mse(plane)
+            )
 
-        return J @ Sigma_p @ J.T
+            start = 4 * plane_index
+            covariance_params[start:start + 4, start:start + 4] = covariance
 
-    def calculate_intersect_point(self, cond_threshold: float = COND_THRESHOLD,
-                                  angle_tol_rad: float = PARALLEL_ANGLE_TOL) -> CrossPoint:
-        diag = self.diagnose_geometry(cond_threshold=cond_threshold, angle_tol_rad=angle_tol_rad)
+        jacobian = np.zeros((3, 12), dtype=float)
 
-        A_mat = np.array([[p.A, p.B, p.C] for p in self.planes], dtype=float)
-        b_vec = np.array([-p.D for p in self.planes], dtype=float)
+        for plane_index in range(3):
+            column = normal_matrix_inv[:, plane_index]
+            start = 4 * plane_index
 
-        if diag.status == PlaneGeometryStatus.SINGULAR:
-            raise ValueError(f"Плоскости не имеют единственной точки пересечения: {diag.messages[0]}")
+            jacobian[:, start] = -x_coord * column
+            jacobian[:, start + 1] = -y_coord * column
+            jacobian[:, start + 2] = -z_coord * column
+            jacobian[:, start + 3] = -column
 
-        x = np.linalg.solve(A_mat, b_vec)
+        covariance_xyz = jacobian @ covariance_params @ jacobian.T
+        covariance_xyz = 0.5 * (
+            covariance_xyz + covariance_xyz.T
+        )
 
-        self.cross_point = CrossPoint(name=self.base_scan.name, x=float(x[0]), y=float(x[1]), z=float(x[2]))
-        self.cross_point.status = diag.status
+        eigenvalues = np.linalg.eigvalsh(covariance_xyz)
+        if np.any(eigenvalues < -1e-12):
+            logger.warning(
+                "Получена не положительно полуопределённая ковариация точки. "
+                "Минимальное собственное значение: {:.3e}",
+                float(eigenvalues.min()),
+            )
+
+        return covariance_xyz
+
+    def calculate_intersect_point(
+        self,
+        cond_threshold: float = COND_THRESHOLD,
+        angle_tol_rad: float = PARALLEL_ANGLE_TOL,
+    ) -> CrossPoint:
+        if self.planes is None:
+            raise RuntimeError(
+                "Плоскости ещё не вычислены. Сначала вызовите calculate_planes()."
+            )
+
+        diagnostics = self.diagnose_geometry(
+            cond_threshold=cond_threshold,
+            angle_tol_rad=angle_tol_rad,
+        )
+
+        normal_matrix = np.array(
+            [[plane.A, plane.B, plane.C] for plane in self.planes],
+            dtype=float,
+        )
+        right_side = np.array(
+            [-plane.D for plane in self.planes],
+            dtype=float,
+        )
+
+        if diagnostics.status == PlaneGeometryStatus.SINGULAR:
+            logger.error(
+                "Плоскости не имеют единственной точки пересечения: {}",
+                diagnostics.messages[0],
+            )
+            raise ValueError(
+                "Плоскости не имеют единственной точки пересечения: "
+                f"{diagnostics.messages[0]}"
+            )
+
+        logger.info("Решение СЛАУ для координат точки пересечения")
+        xyz = np.linalg.solve(normal_matrix, right_side)
+
+        self.cross_point = CrossPoint(
+            name=self.base_scan.name,
+            x=float(xyz[0]),
+            y=float(xyz[1]),
+            z=float(xyz[2]),
+        )
+        self.cross_point.status = diagnostics.status
 
         plane_mses = [plane.mse for plane in self.planes]
         self.cross_point.load_mses(plane_mses=plane_mses)
 
-        if diag.is_reliable:
-            cov_xyz = self._propagate_covariance(self.planes)
-            self.cross_point.load_covariance(cov_xyz)
+        if diagnostics.is_reliable:
+            logger.info(
+                "Перенос ковариаций параметров плоскостей на виртуальную точку"
+            )
+
+            covariance_xyz = self._propagate_covariance(self.planes)
+            self.cross_point.load_covariance(covariance_xyz)
+
+            logger.success(
+                "Ковариация точки определена: sigma_X={:.6f}, "
+                "sigma_Y={:.6f}, sigma_Z={:.6f}",
+                self.cross_point.sigma_xyz[0],
+                self.cross_point.sigma_xyz[1],
+                self.cross_point.sigma_xyz[2],
+            )
         else:
             self.cross_point.mark_unreliable_accuracy()
-            logger.warning("Ковариация точки %s не вычислена: %s | cond(N)=%.1f",
-                           self.base_scan.name, diag.status, diag.cond)
+
+            logger.warning(
+                "Ковариация точки '{}' не вычислена: status={}, "
+                "cond(N)={:.2f}",
+                self.base_scan.name,
+                diagnostics.status,
+                diagnostics.cond,
+            )
 
         return self.cross_point
 
     def get_result_str(self) -> str:
-        cp = self.cross_point
-        parts = [self.base_scan.name, f"x={cp.x:.6f}", f"y={cp.y:.6f}", f"z={cp.z:.6f}", f"status={cp.status}"]
+        if self.cross_point is None:
+            raise RuntimeError(
+                "Точка пересечения ещё не вычислена. "
+                "Сначала вызовите calculate_intersect_point()."
+            )
 
-        if cp.reliable_accuracy and cp.sigma_xyz is not None:
-            sx, sy, sz = cp.sigma_xyz
-            parts.append(f"sx={sx:.6f}")
-            parts.append(f"sy={sy:.6f}")
-            parts.append(f"sz={sz:.6f}")
+        point = self.cross_point
+
+        parts = [
+            self.base_scan.name,
+            f"x={point.x:.6f}",
+            f"y={point.y:.6f}",
+            f"z={point.z:.6f}",
+            f"status={point.status}",
+        ]
+
+        if point.reliable_accuracy and point.sigma_xyz is not None:
+            sigma_x, sigma_y, sigma_z = point.sigma_xyz
+            parts.extend([
+                f"sigma_x={sigma_x:.6f}",
+                f"sigma_y={sigma_y:.6f}",
+                f"sigma_z={sigma_z:.6f}",
+            ])
         else:
             parts.append("accuracy=UNRELIABLE")
 
         if self.geometry_diagnostics is not None:
-            diag = self.geometry_diagnostics
-            parts.append(f"cond(N)={diag.cond:.1f}")
-            parts.append(f"det(N)={diag.det:.6f}")
+            diagnostics = self.geometry_diagnostics
+            parts.extend([
+                f"cond(N)={diagnostics.cond:.2f}",
+                f"det(N)={diagnostics.det:.6f}",
+            ])
 
         return ", ".join(parts)

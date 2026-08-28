@@ -22,7 +22,7 @@ class IterativePlaneFitter(PlaneFitterABC):
     def fit_plane(self, *args, mse_threshold=0.001, max_iteration=20, k_sigma=3,
                   base_fitter=PlaneL1Fitter, final_fitter=PlaneLSMFitter,
                   min_points=6, **kwargs):
-        from app.base.scan.ScanPlane import ScanPlane
+        from app.scan.ScanPlane import ScanPlane
 
         current_scan = self.scan
         robust_plane = None
