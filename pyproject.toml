@@ -13,7 +13,8 @@ dependencies = [
     "laspy (>=2.7.0,<3.0.0)",
     "scikit-learn (>=1.9.0,<2.0.0)",
     "matplotlib (>=3.11.1,<4.0.0)",
-    "pandas (>=3.0.5,<4.0.0)"
+    "pandas (>=3.0.5,<4.0.0)",
+    "ipykernel (>=7.3.0,<8.0.0)"
 ]
 
 [tool.poetry.group.dev.dependencies]

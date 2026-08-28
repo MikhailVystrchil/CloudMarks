@@ -1,5 +1,5 @@
 from CONFIG import DEFAULT_POINTS_COLOR
-from app.base.Point import Point
+from app import Point
 
 
 class ScanPoint(Point):

@@ -1,4 +1,3 @@
-from app.scan.Scan import Scan
 
 
 class ScanSplitterByLabels:

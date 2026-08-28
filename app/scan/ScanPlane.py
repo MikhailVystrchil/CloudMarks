@@ -1,9 +1,8 @@
 import numpy as np
 from loguru import logger
 
-from app.base.Plane import Plane
-from app.scan.Scan import Scan
-from app.scan.plane_fitters.PlaneLSMFitter import PlaneLSMFitter
+from app import Plane, Scan
+from app.scan.plane_fitters import PlaneLSMFitter
 
 
 class ScanPlane(Plane):

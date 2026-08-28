@@ -1,8 +1,8 @@
-from app.base.Point import Point
-from app.scan.ScanPoint import ScanPoint
-from app.scan.parsers.ScanParserFactory import ScanParserFactory
-from app.scan.plotters.ScanPlotterMPL import ScanPlotterMPL
-from app.scan.utils.ScanNormalsCalculator import ScanNormalsCalculator
+from .ScanPoint import ScanPoint
+from app import Point
+from app.scan.parsers import ScanParserFactory
+from app.scan.plotters import ScanPlotterMPL
+from app.scan.utils import ScanNormalsCalculator
 
 
 class Scan:
