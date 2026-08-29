@@ -16,11 +16,16 @@ CloudMarks.
 
 from app.base import NamedPoint, Plane, Point
 from app.batch import (
+    ExtractionConfig,
     PointPairComparisonRunner,
     ReferencePoint,
     ReferencePointProcessingResult,
     ReferencePointReader,
     ScanNeighborhoodExtractor,
+    SingleScanPointExtractor,
+    SingleScanPointResult,
+    ensure_unique_names,
+    load_scan_from_file,
 )
 from app.cross_points import (
     CrossPoint,
@@ -47,9 +52,14 @@ __all__ = [
     "PlaneGeometryStatus",
     "DeformationAnalyzer",
     "DeformationResult",
+    "ExtractionConfig",
     "ReferencePoint",
     "ReferencePointReader",
     "ReferencePointProcessingResult",
     "ScanNeighborhoodExtractor",
+    "SingleScanPointExtractor",
+    "SingleScanPointResult",
     "PointPairComparisonRunner",
+    "load_scan_from_file",
+    "ensure_unique_names",
 ]

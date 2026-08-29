@@ -8,12 +8,15 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+from app.batch.ExtractionConfig import ExtractionConfig
 from app.batch.ReferencePoint import ReferencePoint
 from app.batch.ReferencePointReader import ReferencePointReader
 from app.batch.SingleScanPointExtractor import (
     SingleScanPointExtractor,
     SingleScanPointResult,
 )
+from app.batch.scan_loading import load_scan_from_file
+from app.batch.validation import ensure_unique_names
 from app.deformation.DeformationAnalyzer import DeformationAnalyzer
 from app.scan.Scan import Scan
 
@@ -112,33 +115,7 @@ class ReferencePointProcessingResult:
             return
 
         result.update(
-            {
-                f"{prefix}_x": float(point.x),
-                f"{prefix}_y": float(point.y),
-                f"{prefix}_z": float(point.z),
-                f"{prefix}_status": str(point.status),
-                f"{prefix}_reliable_accuracy": bool(
-                    point.reliable_accuracy
-                ),
-            }
-        )
-
-        if point.sigma_xyz is None:
-            result.update(
-                {
-                    f"{prefix}_sigma_x": np.nan,
-                    f"{prefix}_sigma_y": np.nan,
-                    f"{prefix}_sigma_z": np.nan,
-                }
-            )
-            return
-
-        result.update(
-            {
-                f"{prefix}_sigma_x": float(point.sigma_xyz[0]),
-                f"{prefix}_sigma_y": float(point.sigma_xyz[1]),
-                f"{prefix}_sigma_z": float(point.sigma_xyz[2]),
-            }
+            point.as_flat_fields(prefix=prefix)
         )
 
 
@@ -166,95 +143,35 @@ class PointPairComparisonRunner:
         self,
         scan_epoch1: Scan,
         scan_epoch2: Scan,
-        default_radius: float,
+        config: ExtractionConfig,
+        *,
         alpha: float = 0.05,
-        min_neighborhood_points: int = 60,
-        min_points_per_plane: int = 15,
-        max_reference_distance_factor: float = 1.25,
         max_pair_distance: float | None = None,
-        normal_k: int = 12,
-        cluster_eps: float = 0.08,
-        cluster_min_samples: int = 3,
     ) -> None:
-        if default_radius <= 0:
-            raise ValueError(
-                "default_radius должен быть положительным."
-            )
-
         if not 0.0 < alpha < 1.0:
             raise ValueError(
                 "alpha должен принадлежать интервалу (0, 1)."
             )
 
-        if min_points_per_plane < 6:
-            raise ValueError(
-                "min_points_per_plane должен быть не менее 6."
-            )
-
-        if min_neighborhood_points < 3 * min_points_per_plane:
-            raise ValueError(
-                "min_neighborhood_points должен быть не меньше "
-                "3 * min_points_per_plane."
-            )
-
-        if max_reference_distance_factor <= 0:
-            raise ValueError(
-                "max_reference_distance_factor должен быть положительным."
-            )
-
-        if normal_k < 3:
-            raise ValueError(
-                "normal_k должен быть не менее 3."
-            )
-
-        if cluster_eps <= 0:
-            raise ValueError(
-                "cluster_eps должен быть положительным."
-            )
-
-        if cluster_min_samples < 1:
-            raise ValueError(
-                "cluster_min_samples должен быть положительным."
-            )
-
         self.scan_epoch1 = scan_epoch1
         self.scan_epoch2 = scan_epoch2
-
-        self.default_radius = float(default_radius)
+        self.config = config
         self.alpha = float(alpha)
-
-        self.min_neighborhood_points = int(
-            min_neighborhood_points
-        )
-        self.min_points_per_plane = int(
-            min_points_per_plane
-        )
-
-        self.max_reference_distance_factor = float(
-            max_reference_distance_factor
-        )
 
         self.max_pair_distance = (
             float(max_pair_distance)
             if max_pair_distance is not None
-            else self.default_radius * 0.05
+            else self.config.default_radius * 0.05
         )
 
-        if self.max_pair_distance <= 0:
+        if self.max_pair_distance <= 0.0:
             raise ValueError(
                 "max_pair_distance должен быть положительным."
             )
 
-        self.normal_k = int(normal_k)
-        self.cluster_eps = float(cluster_eps)
-        self.cluster_min_samples = int(
-            cluster_min_samples
-        )
-
         self.extractor_epoch1 = self._create_single_extractor(
             scan=scan_epoch1
         )
-
         self.extractor_epoch2 = self._create_single_extractor(
             scan=scan_epoch2
         )
@@ -270,73 +187,30 @@ class PointPairComparisonRunner:
         cls,
         epoch1_path: str | Path,
         epoch2_path: str | Path,
-        default_radius: float,
+        config: ExtractionConfig,
+        *,
         alpha: float = 0.05,
-        min_neighborhood_points: int = 60,
-        min_points_per_plane: int = 15,
-        max_reference_distance_factor: float = 1.25,
         max_pair_distance: float | None = None,
-        normal_k: int = 12,
-        cluster_eps: float = 0.08,
-        cluster_min_samples: int = 3,
     ) -> "PointPairComparisonRunner":
         """
         Загружает два скана и создаёт runner для их сравнения.
         """
-        scan_epoch1 = cls._load_scan(
-            file_path=epoch1_path,
+        scan_epoch1 = load_scan_from_file(
+            epoch1_path,
             scan_name="epoch1",
         )
-
-        scan_epoch2 = cls._load_scan(
-            file_path=epoch2_path,
+        scan_epoch2 = load_scan_from_file(
+            epoch2_path,
             scan_name="epoch2",
         )
 
         return cls(
             scan_epoch1=scan_epoch1,
             scan_epoch2=scan_epoch2,
-            default_radius=default_radius,
+            config=config,
             alpha=alpha,
-            min_neighborhood_points=min_neighborhood_points,
-            min_points_per_plane=min_points_per_plane,
-            max_reference_distance_factor=(
-                max_reference_distance_factor
-            ),
             max_pair_distance=max_pair_distance,
-            normal_k=normal_k,
-            cluster_eps=cluster_eps,
-            cluster_min_samples=cluster_min_samples,
         )
-
-    @staticmethod
-    def _load_scan(
-        file_path: str | Path,
-        scan_name: str,
-    ) -> Scan:
-        """
-        Загружает один скан LAS/TXT.
-        """
-        path = Path(file_path)
-
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"Файл скана не найден: {path}"
-            )
-
-        scan = Scan(scan_name)
-
-        scan.import_points_from_file(
-            file_path=str(path),
-            compute_normals=False,
-        )
-
-        if len(scan) == 0:
-            raise ValueError(
-                f"Скан '{path}' не содержит точек."
-            )
-
-        return scan
 
     def _create_single_extractor(
         self,
@@ -347,26 +221,13 @@ class PointPairComparisonRunner:
         """
         return SingleScanPointExtractor(
             scan=scan,
-            default_radius=self.default_radius,
-            min_neighborhood_points=(
-                self.min_neighborhood_points
-            ),
-            min_points_per_plane=(
-                self.min_points_per_plane
-            ),
-            max_reference_distance_factor=(
-                self.max_reference_distance_factor
-            ),
-            normal_k=self.normal_k,
-            cluster_eps=self.cluster_eps,
-            cluster_min_samples=(
-                self.cluster_min_samples
-            ),
+            config=self.config,
         )
 
     def run_from_reference_file(
         self,
         reference_points_path: str | Path,
+        *,
         workers: int = -1,
         fail_on_point_error: bool = False,
         show_progress: bool = True,
@@ -386,11 +247,12 @@ class PointPairComparisonRunner:
         )
 
     def run(
-            self,
-            reference_points: list[ReferencePoint],
-            workers: int = -1,
-            fail_on_point_error: bool = False,
-            show_progress: bool = True,
+        self,
+        reference_points: list[ReferencePoint],
+        *,
+        workers: int = -1,
+        fail_on_point_error: bool = False,
+        show_progress: bool = True,
     ) -> pd.DataFrame:
         """
         Обрабатывает опорные точки в двух эпохах.
@@ -408,15 +270,10 @@ class PointPairComparisonRunner:
                 "workers должен быть -1 или положительным целым числом."
             )
 
-        names = [
-            reference_point.name
-            for reference_point in reference_points
-        ]
-
-        if len(names) != len(set(names)):
-            raise ValueError(
-                "Имена опорных точек должны быть уникальными."
-            )
+        ensure_unique_names(
+            (reference_point.name for reference_point in reference_points),
+            entity_name="опорных точек",
+        )
 
         self.processing_results = []
         self.deformation_results = []
@@ -429,20 +286,24 @@ class PointPairComparisonRunner:
             disable=not show_progress,
         )
 
-        try:
-            valid_points_epoch1: list[Any] = []
-            valid_points_epoch2: list[Any] = []
+        valid_points_epoch1: list[Any] = []
+        valid_points_epoch2: list[Any] = []
 
+        try:
             for reference_point in reference_points:
-                result_epoch1 = self.extractor_epoch1._process_reference_point(
-                    reference_point=reference_point,
-                    fail_on_point_error=fail_on_point_error,
+                result_epoch1 = (
+                    self.extractor_epoch1._process_reference_point(
+                        reference_point=reference_point,
+                        fail_on_point_error=fail_on_point_error,
+                    )
                 )
                 progress.update(1)
 
-                result_epoch2 = self.extractor_epoch2._process_reference_point(
-                    reference_point=reference_point,
-                    fail_on_point_error=fail_on_point_error,
+                result_epoch2 = (
+                    self.extractor_epoch2._process_reference_point(
+                        reference_point=reference_point,
+                        fail_on_point_error=fail_on_point_error,
+                    )
                 )
                 progress.update(1)
 
@@ -452,9 +313,7 @@ class PointPairComparisonRunner:
                     result_epoch2=result_epoch2,
                 )
 
-                self.processing_results.append(
-                    comparison_result
-                )
+                self.processing_results.append(comparison_result)
 
                 if comparison_result.processing_status == self.SUCCESS:
                     valid_points_epoch1.append(
@@ -478,7 +337,7 @@ class PointPairComparisonRunner:
             progress.close()
 
         if show_progress:
-            print("Анализ деформаций...", end=" ", flush=True)
+            tqdm.write("Анализ деформаций...")
 
         self._analyze_deformations(
             points_epoch1=valid_points_epoch1,
@@ -486,8 +345,8 @@ class PointPairComparisonRunner:
         )
 
         if show_progress:
-            print(
-                f"готово: {len(valid_points_epoch1)}/"
+            tqdm.write(
+                f"Готово: {len(valid_points_epoch1)}/"
                 f"{len(reference_points)} пар"
             )
 
@@ -501,15 +360,11 @@ class PointPairComparisonRunner:
     ) -> ReferencePointProcessingResult:
         """
         Объединяет результаты одной точки в двух эпохах.
-
-        Локальный контроль уже выполнил SingleScanPointExtractor.
-        Здесь остаётся только контроль расстояния между виртуальными
-        точками разных эпох.
         """
         radius = (
             float(reference_point.radius)
             if reference_point.radius is not None
-            else self.default_radius
+            else self.config.default_radius
         )
 
         result = ReferencePointProcessingResult(
@@ -534,22 +389,18 @@ class PointPairComparisonRunner:
             result.processing_status = self._map_single_status(
                 result_epoch1.status
             )
-
             result.processing_message = (
                 f"epoch1: {result_epoch1.message}"
             )
-
             return result
 
         if result_epoch2.status != SingleScanPointExtractor.SUCCESS:
             result.processing_status = self._map_single_status(
                 result_epoch2.status
             )
-
             result.processing_message = (
                 f"epoch2: {result_epoch2.message}"
             )
-
             return result
 
         if (
@@ -557,12 +408,10 @@ class PointPairComparisonRunner:
             or result_epoch2.point is None
         ):
             result.processing_status = self.FAILED
-
             result.processing_message = (
                 "Одиночный извлекатель вернул SUCCESS, "
                 "но виртуальная точка отсутствует."
             )
-
             return result
 
         result.pair_distance = self._distance_between_points(
@@ -572,14 +421,12 @@ class PointPairComparisonRunner:
 
         if result.pair_distance > self.max_pair_distance:
             result.processing_status = self.UNRELIABLE
-
             result.processing_message = (
                 "Виртуальные точки epoch1 и epoch2 расходятся на "
                 f"{result.pair_distance:.6f} м; "
                 f"контрольный предел "
                 f"{self.max_pair_distance:.6f} м."
             )
-
             return result
 
         result.processing_status = self.SUCCESS
@@ -653,9 +500,6 @@ class PointPairComparisonRunner:
     def to_dataframe(self) -> pd.DataFrame:
         """
         Возвращает полную таблицу с диагностикой и деформациями.
-
-        Поля dx/dy/dz и статистика деформации присутствуют только
-        для строк со статусом processing_status == SUCCESS.
         """
         rows = {
             result.name: result.as_dict()
@@ -740,6 +584,7 @@ class PointPairComparisonRunner:
     def to_csv(
         self,
         output_path: str | Path,
+        *,
         index: bool = False,
     ) -> None:
         """

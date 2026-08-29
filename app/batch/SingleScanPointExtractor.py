@@ -9,9 +9,12 @@ import pandas as pd
 from loguru import logger
 from tqdm import tqdm
 
+from app.batch.ExtractionConfig import ExtractionConfig
 from app.batch.ReferencePoint import ReferencePoint
 from app.batch.ReferencePointReader import ReferencePointReader
 from app.batch.ScanNeighborhoodExtractor import ScanNeighborhoodExtractor
+from app.batch.scan_loading import load_scan_from_file
+from app.batch.validation import ensure_unique_names
 from app.cross_points.CrossPointExacter import CrossPointExacter
 from app.scan.Scan import Scan
 
@@ -58,9 +61,7 @@ class SingleScanPointResult:
             "message": self.message,
         }
 
-        point = self.point
-
-        if point is None:
+        if self.point is None:
             result.update(
                 {
                     "x": np.nan,
@@ -75,23 +76,10 @@ class SingleScanPointResult:
             )
             return result
 
-        sigma = (
-            point.sigma_xyz
-            if point.reliable_accuracy and point.sigma_xyz is not None
-            else (np.nan, np.nan, np.nan)
-        )
-
         result.update(
-            {
-                "x": float(point.x),
-                "y": float(point.y),
-                "z": float(point.z),
-                "geometry_status": point.status,
-                "reliable_accuracy": bool(point.reliable_accuracy),
-                "sigma_x": float(sigma[0]),
-                "sigma_y": float(sigma[1]),
-                "sigma_z": float(sigma[2]),
-            }
+            self.point.as_flat_fields(
+                status_key="geometry_status",
+            )
         )
 
         return result
@@ -110,17 +98,6 @@ class SingleScanPointExtractor:
     5. Рассчитывается виртуальная точка — пересечение плоскостей.
     6. Проводится контроль качества геометрии и расстояния до опорной точки.
     7. Результаты доступны как DataFrame, консольный отчёт и CSV.
-
-    Пример
-    -------
-    >>> extractor = SingleScanPointExtractor.from_files(
-    ...     scan_path="data/scan.las",
-    ...     reference_points_path="data/marks.txt",
-    ...     default_radius=0.15,
-    ... )
-    >>> extractor.run()
-    >>> extractor.print_report()
-    >>> extractor.export_csv("output/points.csv")
     """
 
     SUCCESS = "SUCCESS"
@@ -130,102 +107,48 @@ class SingleScanPointExtractor:
     def __init__(
         self,
         scan: Scan,
-        default_radius: float,
-        min_neighborhood_points: int = 60,
-        min_points_per_plane: int = 15,
-        max_reference_distance_factor: float = 1.25,
-        normal_k: int = 12,
-        cluster_eps: float = 0.08,
-        cluster_min_samples: int = 3,
+        config: ExtractionConfig,
     ) -> None:
-        if default_radius <= 0:
-            raise ValueError(
-                "default_radius должен быть положительным."
-            )
-
-        if min_points_per_plane < 6:
-            raise ValueError(
-                "min_points_per_plane должен быть не менее 6."
-            )
-
-        if min_neighborhood_points < 3 * min_points_per_plane:
-            raise ValueError(
-                "min_neighborhood_points должен быть не меньше "
-                "3 * min_points_per_plane."
-            )
-
-        if max_reference_distance_factor <= 0:
-            raise ValueError(
-                "max_reference_distance_factor должен быть положительным."
-            )
-
-        if normal_k < 3:
-            raise ValueError(
-                "normal_k должен быть не менее 3."
-            )
-
-        if cluster_eps <= 0:
-            raise ValueError(
-                "cluster_eps должен быть положительным."
-            )
-
-        if cluster_min_samples < 1:
-            raise ValueError(
-                "cluster_min_samples должен быть положительным."
-            )
-
         self.scan = scan
+        self.config = config
 
-        self.default_radius = float(default_radius)
-        self.min_neighborhood_points = int(
-            min_neighborhood_points
-        )
-        self.min_points_per_plane = int(
-            min_points_per_plane
-        )
-        self.max_reference_distance_factor = float(
-            max_reference_distance_factor
-        )
-        self.normal_k = int(normal_k)
-        self.cluster_eps = float(cluster_eps)
-        self.cluster_min_samples = int(
-            cluster_min_samples
-        )
-
-        self.extractor = ScanNeighborhoodExtractor(
-            scan=scan
-        )
+        self.extractor = ScanNeighborhoodExtractor(scan=scan)
         self.results: list[SingleScanPointResult] = []
 
     @classmethod
     def from_files(
-            cls,
-            scan_path: str | Path,
-            reference_points_path: str | Path,
-            default_radius: float,
-            show_progress: bool = True,
-            **kwargs: Any,
+        cls,
+        scan_path: str | Path,
+        reference_points_path: str | Path,
+        config: ExtractionConfig,
+        *,
+        show_progress: bool = True,
     ) -> "SingleScanPointExtractor":
         """
         Создаёт обработчик, загружая скан и файл опорных точек.
         """
         if show_progress:
-            print("[1/3] Загрузка скана...", end=" ", flush=True)
+            print(
+                "[1/3] Загрузка скана...",
+                end=" ",
+                flush=True,
+            )
 
-        scan = cls._load_scan(
-            file_path=scan_path
-        )
+        scan = load_scan_from_file(scan_path)
 
         if show_progress:
             print(f"готово: {len(scan):,} точек")
 
         if show_progress:
-            print("[2/3] Построение пространственного индекса...", end=" ", flush=True)
+            print(
+                "[2/3] Построение пространственного индекса...",
+                end=" ",
+                flush=True,
+            )
 
         instance = cls(
             scan=scan,
-            default_radius=default_radius,
-            **kwargs,
+            config=config,
         )
 
         if show_progress:
@@ -243,49 +166,12 @@ class SingleScanPointExtractor:
 
         return instance
 
-    @staticmethod
-    def _load_scan(
-        file_path: str | Path,
-    ) -> Scan:
-        """
-        Загружает один скан и проверяет, что в нём есть точки.
-        """
-        path = Path(file_path)
-
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"Файл скана не найден: {path}"
-            )
-
-        logger.info(
-            "Загрузка скана: {}",
-            path,
-        )
-
-        scan = Scan(path.stem)
-        scan.import_points_from_file(
-            file_path=str(path),
-            compute_normals=False,
-        )
-
-        if len(scan) == 0:
-            raise ValueError(
-                f"Скан '{path}' не содержит точек."
-            )
-
-        logger.success(
-            "Скан '{}' загружен: {} точек",
-            scan.name,
-            len(scan),
-        )
-
-        return scan
-
     def run(
-            self,
-            reference_points: list[ReferencePoint] | None = None,
-            fail_on_point_error: bool = False,
-            show_progress: bool = True,
+        self,
+        reference_points: list[ReferencePoint] | None = None,
+        *,
+        fail_on_point_error: bool = False,
+        show_progress: bool = True,
     ) -> "SingleScanPointExtractor":
         """
         Обрабатывает все опорные точки.
@@ -301,12 +187,10 @@ class SingleScanPointExtractor:
                 "Список опорных точек пуст."
             )
 
-        names = [point.name for point in points]
-
-        if len(names) != len(set(names)):
-            raise ValueError(
-                "Имена опорных точек должны быть уникальными."
-            )
+        ensure_unique_names(
+            (point.name for point in points),
+            entity_name="опорных точек",
+        )
 
         self.results = []
 
@@ -325,7 +209,6 @@ class SingleScanPointExtractor:
                 reference_point=point,
                 fail_on_point_error=fail_on_point_error,
             )
-
             self.results.append(result)
 
         success_count = sum(
@@ -334,7 +217,7 @@ class SingleScanPointExtractor:
         )
 
         if show_progress:
-            print(
+            tqdm.write(
                 f"Готово: {success_count}/{len(self.results)} "
                 "надёжных точек"
             )
@@ -352,7 +235,7 @@ class SingleScanPointExtractor:
         radius = (
             float(reference_point.radius)
             if reference_point.radius is not None
-            else self.default_radius
+            else self.config.default_radius
         )
 
         result = SingleScanPointResult(
@@ -371,11 +254,14 @@ class SingleScanPointExtractor:
 
             result.neighborhood_points = len(neighborhood)
 
-            if result.neighborhood_points < self.min_neighborhood_points:
+            if (
+                result.neighborhood_points
+                < self.config.min_neighborhood_points
+            ):
                 raise ValueError(
                     "Недостаточно точек в окрестности: "
                     f"{result.neighborhood_points}; требуется не менее "
-                    f"{self.min_neighborhood_points}."
+                    f"{self.config.min_neighborhood_points}."
                 )
 
             virtual_point = self._extract_virtual_point(
@@ -399,7 +285,7 @@ class SingleScanPointExtractor:
 
             max_distance = (
                 radius
-                * self.max_reference_distance_factor
+                * self.config.max_reference_distance_factor
             )
 
             if result.reference_distance > max_distance:
@@ -452,10 +338,14 @@ class SingleScanPointExtractor:
             scan=neighborhood,
             reference_xyz=reference_point.as_array(),
             show_scans=False,
-            normal_k=self.normal_k,
-            min_points_per_plane=self.min_points_per_plane,
-            cluster_eps=self.cluster_eps,
-            cluster_min_samples=self.cluster_min_samples,
+            normal_k=self.config.normal_k,
+            min_points_per_plane=(
+                self.config.min_points_per_plane
+            ),
+            cluster_eps=self.config.cluster_eps,
+            cluster_min_samples=(
+                self.config.cluster_min_samples
+            ),
         )
 
         exacter.calculate_planes()
@@ -497,12 +387,6 @@ class SingleScanPointExtractor:
     def print_report(self) -> None:
         """
         Печатает компактную сводку результатов в стандартный вывод.
-
-        В таблице выводятся:
-        - имя точки;
-        - рассчитанные X, Y, Z;
-        - СКП координат;
-        - статус обработки.
         """
         if not self.results:
             print(
@@ -548,12 +432,11 @@ class SingleScanPointExtractor:
     def export_csv(
         self,
         output_path: str | Path,
+        *,
         index: bool = False,
     ) -> Path:
         """
         Экспортирует полную таблицу результатов в UTF-8 CSV.
-
-        Возвращает путь к созданному файлу.
         """
         output_path = Path(output_path)
 

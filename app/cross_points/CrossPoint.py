@@ -221,6 +221,53 @@ class CrossPoint(NamedPoint):
 
         return result
 
+    def as_flat_fields(
+            self,
+            *,
+            prefix: str = "",
+            status_key: str = "status",
+    ) -> dict[str, object]:
+        """
+        Возвращает набор полей виртуальной точки для плоской таблицы.
+
+        Метод используется результатами одиночной и межэпоховой обработки,
+        чтобы централизовать преобразование координат, статуса, признака
+        надёжности и СКП в CSV/DataFrame-представление.
+
+        Parameters
+        ----------
+        prefix:
+            Необязательный префикс полей. Например, ``epoch1`` создаёт ключи
+            ``epoch1_x``, ``epoch1_y`` и т. д.
+        status_key:
+            Имя поля статуса без префикса. Для одиночного извлечения удобно
+            передавать ``geometry_status``.
+        """
+        normalized_prefix = (
+            f"{prefix}_"
+            if prefix
+            else ""
+        )
+
+        sigma = (
+            self.sigma_xyz
+            if self.reliable_accuracy and self.sigma_xyz is not None
+            else (np.nan, np.nan, np.nan)
+        )
+
+        return {
+            f"{normalized_prefix}x": float(self.x),
+            f"{normalized_prefix}y": float(self.y),
+            f"{normalized_prefix}z": float(self.z),
+            f"{normalized_prefix}{status_key}": self.status,
+            f"{normalized_prefix}reliable_accuracy": bool(
+                self.reliable_accuracy
+            ),
+            f"{normalized_prefix}sigma_x": float(sigma[0]),
+            f"{normalized_prefix}sigma_y": float(sigma[1]),
+            f"{normalized_prefix}sigma_z": float(sigma[2]),
+        }
+
     def to_dataframe(self) -> pd.DataFrame:
         """
         Возвращает виртуальную точку как DataFrame из одной строки.
