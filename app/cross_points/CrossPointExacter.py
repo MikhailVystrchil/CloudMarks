@@ -693,9 +693,7 @@ class CrossPointExacter:
         Находит точку пересечения трёх плоскостей и оценивает ковариацию.
         """
         if self.planes is None:
-            raise RuntimeError(
-                "Сначала необходимо вычислить плоскости."
-            )
+            self.calculate_planes()
 
         diagnostics = self.diagnose_geometry(
             cond_threshold=cond_threshold,

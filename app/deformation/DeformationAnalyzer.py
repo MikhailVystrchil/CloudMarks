@@ -13,10 +13,22 @@ from app.base.Point import NamedPoint
 @dataclass(frozen=True, slots=True)
 class DeformationResult:
     """
-    Результат анализа смещения одной виртуальной точки между эпохами.
+    Результат статистического анализа смещения одной виртуальной точки.
+
+    delta:
+        Вектор смещения:
+            delta = point_epoch2 - point_epoch1.
+
+    displacement:
+        Модуль пространственного смещения в метрах.
+
+    sigma_displacement:
+        СКП модуля смещения в метрах, вычисленная через перенос
+        ковариации в направлении вектора delta.
     """
 
     name: str
+
     delta: np.ndarray
     displacement: float
     sigma_displacement: float
@@ -39,13 +51,22 @@ class DeformationResult:
 
     @property
     def displacement_mm(self) -> float:
+        """
+        Модуль смещения в миллиметрах.
+        """
         return self.displacement * 1000.0
 
     @property
     def sigma_displacement_mm(self) -> float:
+        """
+        СКП модуля смещения в миллиметрах.
+        """
         return self.sigma_displacement * 1000.0
 
     def as_dict(self) -> dict[str, object]:
+        """
+        Преобразует результат в словарь для DataFrame и CSV.
+        """
         return {
             "name": self.name,
             "dx": float(self.delta[0]),
@@ -57,7 +78,9 @@ class DeformationResult:
             "sigma_dy": self.sigma_dy,
             "sigma_dz": self.sigma_dz,
             "sigma_displacement": self.sigma_displacement,
-            "sigma_displacement_mm": self.sigma_displacement_mm,
+            "sigma_displacement_mm": (
+                self.sigma_displacement_mm
+            ),
             "t_value": self.t_value,
             "p_value_t": self.p_value_t,
             "significant_t": self.significant_t,
@@ -69,64 +92,75 @@ class DeformationResult:
         }
 
     def __str__(self) -> str:
-        t_status = (
-            "SIGNIFICANT"
-            if self.significant_t
-            else "not significant"
-        )
-
-        chi2_status = (
-            "n/a"
-            if self.significant_chi2 is None
-            else (
-                "SIGNIFICANT"
-                if self.significant_chi2
-                else "not significant"
-            )
-        )
-
-        result = (
-            f"[{self.name}] "
-            f"d={self.displacement_mm:.2f} mm "
-            f"± {self.sigma_displacement_mm:.2f} mm | "
-            f"T={self.t_value:.3f}, "
-            f"p={self.p_value_t:.4f} "
-            f"({t_status})"
-        )
-
-        if self.chi2_value is None:
-            return result + " | chi2=n/a"
-
+        """
+        Возвращает компактное текстовое представление результата.
+        """
         return (
-            f"{result} | "
-            f"chi2={self.chi2_value:.3f}, "
-            f"p={self.p_value_chi2:.4f} "
-            f"({chi2_status})"
+            f"DeformationResult("
+            f"name={self.name!r}, "
+            f"dx={self.delta[0]:.6f}, "
+            f"dy={self.delta[1]:.6f}, "
+            f"dz={self.delta[2]:.6f}, "
+            f"displacement={self.displacement:.6f} m, "
+            f"displacement_mm={self.displacement_mm:.3f} mm, "
+            f"sigma_displacement={self.sigma_displacement:.6f} m, "
+            f"t={self.t_value:.3f}, "
+            f"p_t={self.p_value_t:.6f}, "
+            f"significant_t={self.significant_t}, "
+            f"chi2={self.chi2_value}, "
+            f"p_chi2={self.p_value_chi2}, "
+            f"significant_chi2={self.significant_chi2}, "
+            f"reliable={self.reliable}"
+            f")"
         )
 
 
 class DeformationAnalyzer:
     """
-    Анализирует пространственные смещения точек между двумя эпохами.
+    Анализирует смещения одноимённых виртуальных точек двух эпох.
 
-    Для точки с координатами ``X1`` и ``X2`` вычисляется:
+    Для каждой точки вычисляются:
 
-    ``d = X2 - X1``
+    1. Вектор смещения:
 
-    При наличии ковариаций:
+       delta = X_epoch2 - X_epoch1
 
-    ``Sigma_d = Sigma_1 + Sigma_2 - C_12 - C_12^T``
+    2. Модуль пространственного смещения:
 
-    Выполняются:
-    - одномерный нормальный тест для длины смещения;
-    - многомерный критерий ``chi²`` для вектора смещения.
+       S = ||delta||
+
+    3. Ковариация смещения:
+
+       C_delta = C_epoch1 + C_epoch2
+
+    Предполагается, что оценки координат двух эпох независимы.
+
+    4. СКП компонент вектора смещения:
+
+       sigma_dx = sqrt(C_delta[0, 0])
+       sigma_dy = sqrt(C_delta[1, 1])
+       sigma_dz = sqrt(C_delta[2, 2])
+
+    5. СКП модуля смещения:
+
+       sigma_S^2 = u^T C_delta u
+
+       где:
+
+       u = delta / ||delta||
+
+    6. t-проверка по модулю:
+
+       t = S / sigma_S
+
+    7. chi-square-проверка полного трёхмерного вектора:
+
+       chi2 = delta^T C_delta^(-1) delta
     """
 
     def __init__(
         self,
-        *,
         alpha: float = 0.05,
-        cross_cov_map: dict[str, np.ndarray] | None = None,
     ) -> None:
         if not 0.0 < alpha < 1.0:
             raise ValueError(
@@ -134,99 +168,152 @@ class DeformationAnalyzer:
             )
 
         self.alpha = float(alpha)
-        self.cross_cov_map = cross_cov_map or {}
         self._results: list[DeformationResult] = []
 
     def analyze_point_sets(
         self,
         points_epoch1: list[NamedPoint],
         points_epoch2: list[NamedPoint],
-    ) -> "DeformationAnalyzer":
+    ) -> list[DeformationResult]:
         """
-        Анализирует точки с совпадающими именами.
-        """
-        points_map_epoch1 = {
-            point.name: point
-            for point in points_epoch1
-        }
-        points_map_epoch2 = {
-            point.name: point
-            for point in points_epoch2
-        }
+        Анализирует набор одноимённых точек двух эпох.
 
-        common_names = sorted(
-            set(points_map_epoch1)
-            & set(points_map_epoch2)
+        Точки сопоставляются по полю ``name``. Множества имён должны
+        совпадать, а имена в пределах каждой эпохи быть уникальными.
+        """
+        epoch1_by_name = self._index_points(
+            points=points_epoch1,
+            epoch_name="epoch1",
         )
 
-        self._results = [
-            self._analyze_single_point(
-                point_epoch1=points_map_epoch1[name],
-                point_epoch2=points_map_epoch2[name],
-            )
-            for name in common_names
-        ]
+        epoch2_by_name = self._index_points(
+            points=points_epoch2,
+            epoch_name="epoch2",
+        )
 
-        return self
+        names_epoch1 = set(epoch1_by_name)
+        names_epoch2 = set(epoch2_by_name)
+
+        if names_epoch1 != names_epoch2:
+            missing_in_epoch2 = sorted(
+                names_epoch1 - names_epoch2
+            )
+            missing_in_epoch1 = sorted(
+                names_epoch2 - names_epoch1
+            )
+
+            raise ValueError(
+                "Наборы имён точек двух эпох не совпадают. "
+                f"Нет в epoch2: {missing_in_epoch2}; "
+                f"нет в epoch1: {missing_in_epoch1}."
+            )
+
+        self._results = []
+
+        for name in sorted(names_epoch1):
+            result = self._analyze_single_point(
+                point_epoch1=epoch1_by_name[name],
+                point_epoch2=epoch2_by_name[name],
+            )
+
+            self._results.append(result)
+
+        logger.success(
+            "Статистический анализ завершён: точек={}, "
+            "значимых t={}, alpha={}",
+            len(self._results),
+            self.n_significant,
+            self.alpha,
+        )
+
+        return self.results
+
+    @staticmethod
+    def _index_points(
+        points: list[NamedPoint],
+        epoch_name: str,
+    ) -> dict[str, NamedPoint]:
+        """
+        Формирует индекс точек по имени и контролирует дубликаты.
+        """
+        indexed: dict[str, NamedPoint] = {}
+
+        for point in points:
+            name = str(point.name)
+
+            if not name:
+                raise ValueError(
+                    f"В {epoch_name} найдена точка с пустым именем."
+                )
+
+            if name in indexed:
+                raise ValueError(
+                    f"В {epoch_name} имя точки '{name}' повторяется."
+                )
+
+            indexed[name] = point
+
+        return indexed
 
     def _analyze_single_point(
         self,
         point_epoch1: NamedPoint,
         point_epoch2: NamedPoint,
     ) -> DeformationResult:
-        name = point_epoch1.name
+        """
+        Рассчитывает деформацию одной одноимённой пары точек.
+        """
+        if point_epoch1.name != point_epoch2.name:
+            raise ValueError(
+                "Для анализа должны передаваться точки "
+                "с одинаковыми именами."
+            )
 
-        xyz_epoch1 = point_epoch1.as_array()
-        xyz_epoch2 = point_epoch2.as_array()
-
-        delta = xyz_epoch2 - xyz_epoch1
-        displacement = float(
-            np.linalg.norm(delta)
+        coordinate_epoch1 = np.asarray(
+            [
+                point_epoch1.x,
+                point_epoch1.y,
+                point_epoch1.z,
+            ],
+            dtype=np.float64,
         )
 
-        covariance_epoch1 = getattr(
-            point_epoch1,
-            "cov_xyz",
-            None,
-        )
-        covariance_epoch2 = getattr(
-            point_epoch2,
-            "cov_xyz",
-            None,
+        coordinate_epoch2 = np.asarray(
+            [
+                point_epoch2.x,
+                point_epoch2.y,
+                point_epoch2.z,
+            ],
+            dtype=np.float64,
         )
 
-        if (
-            covariance_epoch1 is None
-            or covariance_epoch2 is None
-        ):
-            return self._make_unreliable_result(
-                name=name,
-                delta=delta,
-                displacement=displacement,
+        if not np.all(np.isfinite(coordinate_epoch1)):
+            raise ValueError(
+                f"Координаты точки '{point_epoch1.name}' "
+                "в epoch1 содержат NaN или Inf."
+            )
+
+        if not np.all(np.isfinite(coordinate_epoch2)):
+            raise ValueError(
+                f"Координаты точки '{point_epoch2.name}' "
+                "в epoch2 содержат NaN или Inf."
             )
 
         covariance_epoch1 = self._validate_covariance(
-            covariance=covariance_epoch1,
-            covariance_name=f"cov_xyz эпохи 1 для {name}",
-        )
-        covariance_epoch2 = self._validate_covariance(
-            covariance=covariance_epoch2,
-            covariance_name=f"cov_xyz эпохи 2 для {name}",
+            point=point_epoch1,
+            epoch_name="epoch1",
         )
 
-        cross_covariance = self._validate_covariance(
-            covariance=self.cross_cov_map.get(
-                name,
-                np.zeros((3, 3), dtype=np.float64),
-            ),
-            covariance_name=f"cross_covariance для {name}",
+        covariance_epoch2 = self._validate_covariance(
+            point=point_epoch2,
+            epoch_name="epoch2",
         )
+
+        delta = coordinate_epoch2 - coordinate_epoch1
 
         covariance_delta = (
             covariance_epoch1
             + covariance_epoch2
-            - cross_covariance
-            - cross_covariance.T
         )
 
         covariance_delta = 0.5 * (
@@ -234,145 +321,234 @@ class DeformationAnalyzer:
             + covariance_delta.T
         )
 
+        displacement = float(
+            np.linalg.norm(delta)
+        )
+
         return self._compute_tests(
-            name=name,
+            name=point_epoch1.name,
             delta=delta,
             displacement=displacement,
             cov_delta=covariance_delta,
-            reliable=True,
         )
 
     @staticmethod
     def _validate_covariance(
-        covariance: np.ndarray,
-        covariance_name: str,
+        point: NamedPoint,
+        epoch_name: str,
     ) -> np.ndarray:
-        covariance_array = np.asarray(
+        """
+        Проверяет и возвращает ковариационную матрицу точки формы (3, 3).
+        """
+        reliable_accuracy = getattr(
+            point,
+            "reliable_accuracy",
+            True,
+        )
+
+        if not reliable_accuracy:
+            raise ValueError(
+                f"Точка '{point.name}' в {epoch_name} "
+                "имеет ненадёжную оценку точности."
+            )
+
+        covariance = getattr(
+            point,
+            "cov_xyz",
+            None,
+        )
+
+        if covariance is None:
+            raise ValueError(
+                f"У точки '{point.name}' в {epoch_name} "
+                "отсутствует ковариационная матрица cov_xyz."
+            )
+
+        covariance = np.asarray(
             covariance,
             dtype=np.float64,
         )
 
-        if covariance_array.shape != (3, 3):
+        if covariance.shape != (3, 3):
             raise ValueError(
-                f"{covariance_name} должна иметь форму (3, 3)."
+                f"Ковариация точки '{point.name}' в {epoch_name} "
+                f"имеет форму {covariance.shape}; ожидается (3, 3)."
             )
 
-        if not np.all(np.isfinite(covariance_array)):
+        if not np.all(np.isfinite(covariance)):
             raise ValueError(
-                f"{covariance_name} содержит NaN или Inf."
+                f"Ковариация точки '{point.name}' в {epoch_name} "
+                "содержит NaN или Inf."
             )
 
-        covariance_array = 0.5 * (
-            covariance_array
-            + covariance_array.T
+        covariance = 0.5 * (
+            covariance
+            + covariance.T
         )
 
         eigenvalues = np.linalg.eigvalsh(
-            covariance_array
+            covariance
         )
 
         if np.any(eigenvalues < -1e-12):
             raise ValueError(
-                f"{covariance_name} не является "
-                "положительно полуопределённой."
+                f"Ковариация точки '{point.name}' в {epoch_name} "
+                "не является положительно полуопределённой."
             )
 
-        return covariance_array
+        return covariance
 
     def _compute_tests(
         self,
-        *,
         name: str,
         delta: np.ndarray,
         displacement: float,
         cov_delta: np.ndarray,
-        reliable: bool,
     ) -> DeformationResult:
-        sigma_xyz = np.sqrt(
-            np.maximum(
-                np.diag(cov_delta),
-                0.0,
-            )
+        """
+        Вычисляет СКП модуля смещения, t- и chi-square-критерии.
+
+        Важная деталь реализации:
+        выражение для дисперсии модуля смещения вычисляется через
+        np.einsum("i,ij,j->", ...), чтобы гарантированно получить
+        скаляр независимо от формы NumPy-массивов.
+        """
+        delta = np.asarray(
+            delta,
+            dtype=np.float64,
+        ).reshape(3)
+
+        cov_delta = np.asarray(
+            cov_delta,
+            dtype=np.float64,
         )
 
-        if displacement > 1e-16:
-            direction = (
-                delta / displacement
-            ).reshape(1, 3)
+        if cov_delta.shape != (3, 3):
+            raise ValueError(
+                "cov_delta должна иметь форму (3, 3)."
+            )
+
+        if not np.all(np.isfinite(delta)):
+            raise ValueError(
+                f"Вектор смещения точки '{name}' "
+                "содержит NaN или Inf."
+            )
+
+        if not np.all(np.isfinite(cov_delta)):
+            raise ValueError(
+                f"Ковариация смещения точки '{name}' "
+                "содержит NaN или Inf."
+            )
+
+        cov_delta = 0.5 * (
+            cov_delta
+            + cov_delta.T
+        )
+
+        diagonal = np.diag(cov_delta)
+
+        if np.any(diagonal < -1e-12):
+            raise ValueError(
+                f"Ковариация смещения точки '{name}' "
+                "содержит отрицательные дисперсии."
+            )
+
+        sigma_dx = float(
+            np.sqrt(max(float(diagonal[0]), 0.0))
+        )
+        sigma_dy = float(
+            np.sqrt(max(float(diagonal[1]), 0.0))
+        )
+        sigma_dz = float(
+            np.sqrt(max(float(diagonal[2]), 0.0))
+        )
+
+        if displacement <= 1e-15:
+            displacement_variance = 0.0
+            sigma_displacement = 0.0
+            t_value = 0.0
+            p_value_t = 1.0
+            significant_t = False
+
+        else:
+            unit_vector = delta / displacement
 
             displacement_variance = float(
-                direction
-                @ cov_delta
-                @ direction.T
+                np.einsum(
+                    "i,ij,j->",
+                    unit_vector,
+                    cov_delta,
+                    unit_vector,
+                )
+            )
+
+            displacement_variance = max(
+                displacement_variance,
+                0.0,
             )
 
             sigma_displacement = float(
-                np.sqrt(
-                    max(
-                        displacement_variance,
-                        0.0,
+                np.sqrt(displacement_variance)
+            )
+
+            if sigma_displacement <= 1e-15:
+                t_value = float("inf")
+                p_value_t = 0.0
+                significant_t = True
+
+            else:
+                t_value = float(
+                    displacement / sigma_displacement
+                )
+
+                p_value_t = float(
+                    2.0
+                    * stats.norm.sf(
+                        abs(t_value)
                     )
                 )
-            )
-        else:
-            sigma_displacement = float(
-                np.sqrt(
-                    max(
-                        np.trace(cov_delta) / 3.0,
-                        0.0,
-                    )
+
+                significant_t = bool(
+                    p_value_t < self.alpha
                 )
-            )
-
-        t_value = (
-            displacement / sigma_displacement
-            if sigma_displacement > 1e-16
-            else 0.0
-        )
-
-        p_value_t = float(
-            2.0
-            * (
-                1.0
-                - stats.norm.cdf(
-                    abs(t_value)
-                )
-            )
-        )
-
-        significant_t = p_value_t < self.alpha
 
         chi2_value: float | None = None
         p_value_chi2: float | None = None
         significant_chi2: bool | None = None
+        reliable = True
 
         try:
-            covariance_inverse = np.linalg.inv(
-                cov_delta
-            )
-
             chi2_value = float(
                 delta
-                @ covariance_inverse
-                @ delta
+                @ np.linalg.solve(
+                    cov_delta,
+                    delta,
+                )
             )
 
+            if chi2_value < 0.0:
+                chi2_value = max(
+                    chi2_value,
+                    0.0,
+                )
+
             p_value_chi2 = float(
-                1.0
-                - stats.chi2.cdf(
+                stats.chi2.sf(
                     chi2_value,
                     df=3,
                 )
             )
 
-            significant_chi2 = (
+            significant_chi2 = bool(
                 p_value_chi2 < self.alpha
             )
 
         except np.linalg.LinAlgError:
+            reliable = False
+
             logger.warning(
-                "Не удалось инвертировать ковариацию смещения "
-                "для точки '{}'; chi²-тест пропущен.",
+                "Точка '{}': ковариация смещения вырождена; "
+                "chi-square-проверка не выполнена.",
                 name,
             )
 
@@ -382,10 +558,10 @@ class DeformationAnalyzer:
             displacement=displacement,
             sigma_displacement=sigma_displacement,
             cov_delta=cov_delta,
-            sigma_dx=float(sigma_xyz[0]),
-            sigma_dy=float(sigma_xyz[1]),
-            sigma_dz=float(sigma_xyz[2]),
-            t_value=float(t_value),
+            sigma_dx=sigma_dx,
+            sigma_dy=sigma_dy,
+            sigma_dz=sigma_dz,
+            t_value=t_value,
             p_value_t=p_value_t,
             significant_t=significant_t,
             chi2_value=chi2_value,
@@ -395,46 +571,18 @@ class DeformationAnalyzer:
             reliable=reliable,
         )
 
-    def _make_unreliable_result(
-        self,
-        *,
-        name: str,
-        delta: np.ndarray,
-        displacement: float,
-    ) -> DeformationResult:
-        nan = float("nan")
-
-        return DeformationResult(
-            name=name,
-            delta=delta,
-            displacement=float(displacement),
-            sigma_displacement=nan,
-            cov_delta=np.full(
-                (3, 3),
-                nan,
-                dtype=np.float64,
-            ),
-            sigma_dx=nan,
-            sigma_dy=nan,
-            sigma_dz=nan,
-            t_value=nan,
-            p_value_t=nan,
-            significant_t=False,
-            chi2_value=None,
-            p_value_chi2=None,
-            significant_chi2=None,
-            alpha=self.alpha,
-            reliable=False,
-        )
-
     @property
     def results(self) -> list[DeformationResult]:
+        """
+        Возвращает копию списка результатов.
+        """
         return list(self._results)
 
     @property
-    def significant_results(
-        self,
-    ) -> list[DeformationResult]:
+    def significant_results(self) -> list[DeformationResult]:
+        """
+        Возвращает результаты со значимым смещением по t-критерию.
+        """
         return [
             result
             for result in self._results
@@ -443,18 +591,31 @@ class DeformationAnalyzer:
 
     @property
     def n_significant(self) -> int:
-        return sum(
-            result.significant_t
-            for result in self._results
+        """
+        Количество точек со значимым смещением по t-критерию.
+        """
+        return len(
+            self.significant_results
         )
 
     def to_dataframe(self) -> pd.DataFrame:
-        return pd.DataFrame(
+        """
+        Формирует таблицу результатов анализа деформаций.
+        """
+        dataframe = pd.DataFrame(
             [
                 result.as_dict()
                 for result in self._results
             ]
         )
+
+        if dataframe.empty:
+            return dataframe
+
+        return dataframe.sort_values(
+            by="name",
+            kind="stable",
+        ).reset_index(drop=True)
 
     def to_csv(
         self,
@@ -462,6 +623,9 @@ class DeformationAnalyzer:
         *,
         index: bool = False,
     ) -> None:
+        """
+        Экспортирует результаты анализа в CSV.
+        """
         self.to_dataframe().to_csv(
             file_path,
             index=index,

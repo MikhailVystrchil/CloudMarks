@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from loguru import logger
+from tqdm import tqdm
 
 from app.batch.ReferencePoint import ReferencePoint
 from app.batch.ReferencePointReader import ReferencePointReader
@@ -198,31 +199,28 @@ class SingleScanPointExtractor:
 
     @classmethod
     def from_files(
-        cls,
-        scan_path: str | Path,
-        reference_points_path: str | Path,
-        default_radius: float,
-        **kwargs: Any,
+            cls,
+            scan_path: str | Path,
+            reference_points_path: str | Path,
+            default_radius: float,
+            show_progress: bool = True,
+            **kwargs: Any,
     ) -> "SingleScanPointExtractor":
         """
         Создаёт обработчик, загружая скан и файл опорных точек.
-
-        Параметры
-        ----------
-        scan_path:
-            Путь к LAS- или TXT-файлу исходного облака точек.
-
-        reference_points_path:
-            Путь к CSV, TSV или TXT с опорными точками:
-            ``name x y z [radius]``.
-
-        default_radius:
-            Радиус сферической окрестности в метрах. Используется, если
-            радиус не указан в строке файла опорных точек.
         """
+        if show_progress:
+            print("[1/3] Загрузка скана...", end=" ", flush=True)
+
         scan = cls._load_scan(
             file_path=scan_path
         )
+
+        if show_progress:
+            print(f"готово: {len(scan):,} точек")
+
+        if show_progress:
+            print("[2/3] Построение пространственного индекса...", end=" ", flush=True)
 
         instance = cls(
             scan=scan,
@@ -230,9 +228,18 @@ class SingleScanPointExtractor:
             **kwargs,
         )
 
+        if show_progress:
+            print("готово")
+
         instance.reference_points = ReferencePointReader.read(
             reference_points_path
         )
+
+        if show_progress:
+            print(
+                f"Опорных точек: "
+                f"{len(instance.reference_points)}"
+            )
 
         return instance
 
@@ -275,19 +282,13 @@ class SingleScanPointExtractor:
         return scan
 
     def run(
-        self,
-        reference_points: list[ReferencePoint] | None = None,
-        fail_on_point_error: bool = False,
+            self,
+            reference_points: list[ReferencePoint] | None = None,
+            fail_on_point_error: bool = False,
+            show_progress: bool = True,
     ) -> "SingleScanPointExtractor":
         """
         Обрабатывает все опорные точки.
-
-        Если ``reference_points`` не передан, используются точки, считанные
-        методом ``from_files()``.
-
-        При ``fail_on_point_error=False`` ошибка одной точки не останавливает
-        обработку остальных: точка попадёт в таблицу со статусом FAILED или
-        UNRELIABLE и объяснением в колонке ``message``.
         """
         points = reference_points or getattr(
             self,
@@ -297,40 +298,34 @@ class SingleScanPointExtractor:
 
         if not points:
             raise ValueError(
-                "Список опорных точек пуст. Передайте reference_points "
-                "или используйте SingleScanPointExtractor.from_files()."
+                "Список опорных точек пуст."
             )
 
-        names = [
-            point.name
-            for point in points
-        ]
+        names = [point.name for point in points]
 
         if len(names) != len(set(names)):
             raise ValueError(
                 "Имена опорных точек должны быть уникальными."
             )
 
-        logger.info(
-            "Старт обработки скана '{}': опорных точек={}",
-            self.scan.name,
-            len(points),
-        )
-
         self.results = []
 
-        for index, point in enumerate(points, start=1):
-            logger.info(
-                "Точка {}/{}: '{}'",
-                index,
-                len(points),
-                point.name,
+        iterator = points
+
+        if show_progress:
+            iterator = tqdm(
+                points,
+                desc="[3/3] Извлечение точек",
+                unit="точка",
+                dynamic_ncols=True,
             )
 
+        for point in iterator:
             result = self._process_reference_point(
                 reference_point=point,
                 fail_on_point_error=fail_on_point_error,
             )
+
             self.results.append(result)
 
         success_count = sum(
@@ -338,12 +333,11 @@ class SingleScanPointExtractor:
             for result in self.results
         )
 
-        logger.success(
-            "Обработка скана '{}' завершена: успешно={}/{}",
-            self.scan.name,
-            success_count,
-            len(self.results),
-        )
+        if show_progress:
+            print(
+                f"Готово: {success_count}/{len(self.results)} "
+                "надёжных точек"
+            )
 
         return self
 

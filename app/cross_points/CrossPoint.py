@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 from scipy.stats import chi2
 
 from app.base.Point import NamedPoint
@@ -151,6 +152,83 @@ class CrossPoint(NamedPoint):
         self.sigma_xyz = None
         self.cov_xyz = None
         self.ellipsoid = None
+
+    def as_dict(self) -> dict[str, object]:
+        """
+        Возвращает параметры виртуальной точки в виде словаря.
+
+        Значения sigma_* и параметры эллипсоида равны None, если
+        ковариационная оценка признана ненадёжной.
+        """
+        result: dict[str, object] = {
+            "name": self.name,
+            "x": float(self.x),
+            "y": float(self.y),
+            "z": float(self.z),
+            "status": self.status,
+            "reliable_accuracy": bool(self.reliable_accuracy),
+            "mse": self.mse,
+        }
+
+        if self.planes_mse is not None:
+            for index, plane_mse in enumerate(
+                self.planes_mse,
+                start=1,
+            ):
+                result[f"plane_{index}_mse"] = float(
+                    plane_mse
+                )
+
+        if self.reliable_accuracy and self.sigma_xyz is not None:
+            result.update(
+                {
+                    "sigma_x": float(self.sigma_xyz[0]),
+                    "sigma_y": float(self.sigma_xyz[1]),
+                    "sigma_z": float(self.sigma_xyz[2]),
+                }
+            )
+        else:
+            result.update(
+                {
+                    "sigma_x": None,
+                    "sigma_y": None,
+                    "sigma_z": None,
+                }
+            )
+
+        if self.ellipsoid is not None:
+            semi_axes = self.ellipsoid["semi_axes"]
+
+            result.update(
+                {
+                    "ellipsoid_confidence": float(
+                        self.ellipsoid["confidence"]
+                    ),
+                    "ellipsoid_a": float(semi_axes[0]),
+                    "ellipsoid_b": float(semi_axes[1]),
+                    "ellipsoid_c": float(semi_axes[2]),
+                }
+            )
+        else:
+            result.update(
+                {
+                    "ellipsoid_confidence": None,
+                    "ellipsoid_a": None,
+                    "ellipsoid_b": None,
+                    "ellipsoid_c": None,
+                }
+            )
+
+        return result
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """
+        Возвращает виртуальную точку как DataFrame из одной строки.
+
+        Пример:
+            point.to_dataframe()
+        """
+        return pd.DataFrame([self.as_dict()])
 
     def __str__(self) -> str:
         parts = [
