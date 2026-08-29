@@ -232,46 +232,83 @@ class ReferencePointReader:
 
     @staticmethod
     def _read_plain_text_table(
-        file_path: Path,
+            file_path: Path,
     ) -> pd.DataFrame:
         """
-        Читает TXT без заголовка:
+        Читает TXT без заголовка.
+
+        Поддерживаются строки формата:
 
         ``name X Y Z``
-        или
+
+        и:
+
         ``name X Y Z radius``.
+
+        В одном файле допускается смешение строк с четырьмя и пятью полями.
+        Для строк без radius значение радиуса сохраняется как None.
         """
+        rows: list[list[str | None]] = []
+
         try:
-            dataframe = pd.read_csv(
-                file_path,
-                sep=r"\s+",
-                engine="python",
-                comment="#",
-                header=None,
-                encoding="utf-8-sig",
-            )
-        except Exception as error:
+            with file_path.open(
+                    "r",
+                    encoding="utf-8-sig",
+            ) as input_file:
+                for row_number, raw_line in enumerate(
+                        input_file,
+                        start=1,
+                ):
+                    line = raw_line.strip()
+
+                    if not line or line.startswith("#"):
+                        continue
+
+                    tokens = line.split()
+
+                    if len(tokens) not in {4, 5}:
+                        raise ValueError(
+                            "TXT-файл опорных точек должен содержать "
+                            "4 или 5 полей в каждой строке: "
+                            "name X Y Z [radius]. "
+                            f"Строка {row_number}: найдено "
+                            f"{len(tokens)} полей."
+                        )
+
+                    if len(tokens) == 4:
+                        rows.append(
+                            [
+                                tokens[0],
+                                tokens[1],
+                                tokens[2],
+                                tokens[3],
+                                None,
+                            ]
+                        )
+                    else:
+                        rows.append(tokens)
+
+        except UnicodeDecodeError as error:
+            raise ValueError(
+                f"Не удалось прочитать TXT-файл '{file_path}' как UTF-8: "
+                f"{error}"
+            ) from error
+        except OSError as error:
             raise ValueError(
                 "Не удалось прочитать TXT-файл опорных точек "
                 f"'{file_path}': {error}"
             ) from error
 
-        column_count = dataframe.shape[1]
-
-        if column_count not in {4, 5}:
-            raise ValueError(
-                "TXT-файл опорных точек должен содержать 4 или 5 полей: "
-                "name X Y Z [radius]. "
-                f"Фактически найдено столбцов: {column_count}."
-            )
-
-        dataframe.columns = (
-            ["name", "x", "y", "z"]
-            if column_count == 4
-            else ["name", "x", "y", "z", "radius"]
+        return pd.DataFrame(
+            rows,
+            columns=[
+                "name",
+                "x",
+                "y",
+                "z",
+                "radius",
+            ],
         )
-
-        return dataframe
 
     @staticmethod
     def _row_to_reference_point(

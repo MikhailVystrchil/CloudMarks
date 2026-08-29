@@ -75,3 +75,28 @@ def test_comment_and_blank_lines_are_skipped(tmp_path: Path):
 
     points = ReferencePointReader.read(file_path)
     assert [p.name for p in points] == ["P1", "P2"]
+
+def test_reads_plain_txt_with_mixed_optional_radius(
+    tmp_path: Path,
+):
+    file_path = tmp_path / "mixed_points.txt"
+
+    file_path.write_text(
+        "P1 1.0 2.0 3.0\n"
+        "P2 4.0 5.0 6.0 0.25\n"
+        "P3 7.0 8.0 9.0\n",
+        encoding="utf-8",
+    )
+
+    points = ReferencePointReader.read(file_path)
+
+    assert len(points) == 3
+
+    assert points[0].name == "P1"
+    assert points[0].radius is None
+
+    assert points[1].name == "P2"
+    assert points[1].radius == 0.25
+
+    assert points[2].name == "P3"
+    assert points[2].radius is None

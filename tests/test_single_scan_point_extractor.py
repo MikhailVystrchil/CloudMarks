@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from app.batch.ExtractionConfig import ExtractionConfig
 from app.batch.ReferencePoint import ReferencePoint
 from app.batch.SingleScanPointExtractor import (
     SingleScanPointExtractor,
@@ -28,43 +29,49 @@ def _add_plane_points(
     )
     normal /= np.linalg.norm(normal)
 
-    helper = np.array([1.0, 0.0, 0.0])
+    helper = np.asarray(
+        [1.0, 0.0, 0.0],
+        dtype=float,
+    )
 
     if abs(normal[0]) > 0.9:
-        helper = np.array([0.0, 1.0, 0.0])
+        helper = np.asarray(
+            [0.0, 1.0, 0.0],
+            dtype=float,
+        )
 
     axis_a = helper - helper.dot(normal) * normal
     axis_a /= np.linalg.norm(axis_a)
 
     axis_b = np.cross(normal, axis_a)
 
-    u = rng.uniform(
+    u_coord = rng.uniform(
         -extent,
         extent,
         size=count,
     )
-    v = rng.uniform(
+    v_coord = rng.uniform(
         -extent,
         extent,
         size=count,
     )
 
     coordinates = (
-        np.asarray(center)
-        + u[:, None] * axis_a
-        + v[:, None] * axis_b
+        np.asarray(center, dtype=float)
+        + u_coord[:, None] * axis_a
+        + v_coord[:, None] * axis_b
         + rng.normal(
             scale=noise,
             size=(count, 3),
         )
     )
 
-    for x, y, z in coordinates:
+    for x_coord, y_coord, z_coord in coordinates:
         scan.add_point(
             ScanPoint(
-                x=float(x),
-                y=float(y),
-                z=float(z),
+                x=float(x_coord),
+                y=float(y_coord),
+                z=float(z_coord),
             )
         )
 
@@ -85,34 +92,34 @@ def corner_scan(make_scan):
         np.empty((0, 3)),
     )
 
-    rng = np.random.default_rng(42)
+    random_generator = np.random.default_rng(42)
     center = (1.0, 2.0, 3.0)
 
     _add_plane_points(
         scan=scan,
-        normal=(1, 0, 0),
+        normal=(1.0, 0.0, 0.0),
         center=center,
         extent=0.5,
         count=50,
-        rng=rng,
+        rng=random_generator,
     )
 
     _add_plane_points(
         scan=scan,
-        normal=(0, 1, 0),
+        normal=(0.0, 1.0, 0.0),
         center=center,
         extent=0.5,
         count=50,
-        rng=rng,
+        rng=random_generator,
     )
 
     _add_plane_points(
         scan=scan,
-        normal=(0, 0, 1),
+        normal=(0.0, 0.0, 1.0),
         center=center,
         extent=0.5,
         count=50,
-        rng=rng,
+        rng=random_generator,
     )
 
     return scan
@@ -133,13 +140,16 @@ def test_extractor_recovers_known_corner_point(
 
     extractor = SingleScanPointExtractor(
         scan=corner_scan,
-        default_radius=0.6,
-        min_neighborhood_points=30,
-        min_points_per_plane=10,
+        config=ExtractionConfig(
+            default_radius=0.6,
+            min_neighborhood_points=30,
+            min_points_per_plane=10,
+        ),
     )
 
     extractor.run(
-        reference_points=reference_points
+        reference_points=reference_points,
+        show_progress=False,
     )
 
     assert len(extractor.results) == 1
@@ -149,12 +159,13 @@ def test_extractor_recovers_known_corner_point(
     assert result.status == SingleScanPointExtractor.SUCCESS
     assert result.point is not None
 
-    recovered = np.array(
+    recovered = np.asarray(
         [
             result.point.x,
             result.point.y,
             result.point.z,
-        ]
+        ],
+        dtype=np.float64,
     )
 
     assert np.allclose(
@@ -179,13 +190,16 @@ def test_extractor_reports_problem_for_small_neighborhood(
 
     extractor = SingleScanPointExtractor(
         scan=corner_scan,
-        default_radius=0.05,
-        min_neighborhood_points=30,
-        min_points_per_plane=10,
+        config=ExtractionConfig(
+            default_radius=0.05,
+            min_neighborhood_points=30,
+            min_points_per_plane=10,
+        ),
     )
 
     extractor.run(
-        reference_points=reference_points
+        reference_points=reference_points,
+        show_progress=False,
     )
 
     result = extractor.results[0]
@@ -215,12 +229,18 @@ def test_extractor_rejects_duplicate_reference_names(
 
     extractor = SingleScanPointExtractor(
         scan=corner_scan,
-        default_radius=0.6,
+        config=ExtractionConfig(
+            default_radius=0.6,
+        ),
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match="уникальными",
+    ):
         extractor.run(
-            reference_points=reference_points
+            reference_points=reference_points,
+            show_progress=False,
         )
 
 
@@ -240,23 +260,45 @@ def test_to_dataframe_and_export_csv(
 
     extractor = SingleScanPointExtractor(
         scan=corner_scan,
-        default_radius=0.6,
-        min_neighborhood_points=30,
-        min_points_per_plane=10,
+        config=ExtractionConfig(
+            default_radius=0.6,
+            min_neighborhood_points=30,
+            min_points_per_plane=10,
+        ),
     )
 
     extractor.run(
-        reference_points=reference_points
+        reference_points=reference_points,
+        show_progress=False,
     )
 
     dataframe = extractor.to_dataframe()
 
     assert list(dataframe["name"]) == ["P1"]
-    assert "x" in dataframe.columns
-    assert "y" in dataframe.columns
-    assert "z" in dataframe.columns
-    assert "status" in dataframe.columns
-    assert "message" in dataframe.columns
+
+    expected_columns = {
+        "name",
+        "reference_x",
+        "reference_y",
+        "reference_z",
+        "radius",
+        "neighborhood_points",
+        "reference_distance",
+        "x",
+        "y",
+        "z",
+        "geometry_status",
+        "reliable_accuracy",
+        "sigma_x",
+        "sigma_y",
+        "sigma_z",
+        "status",
+        "message",
+    }
+
+    assert expected_columns.issubset(
+        set(dataframe.columns)
+    )
 
     output_path = tmp_path / "out" / "points.csv"
 
@@ -266,6 +308,9 @@ def test_to_dataframe_and_export_csv(
 
     assert returned_path == output_path
     assert output_path.is_file()
+    assert output_path.read_text(
+        encoding="utf-8"
+    ).strip()
 
 
 def test_run_without_reference_points_raises(
@@ -273,8 +318,13 @@ def test_run_without_reference_points_raises(
 ):
     extractor = SingleScanPointExtractor(
         scan=corner_scan,
-        default_radius=0.6,
+        config=ExtractionConfig(
+            default_radius=0.6,
+        ),
     )
 
-    with pytest.raises(ValueError):
-        extractor.run()
+    with pytest.raises(
+        ValueError,
+        match="Список опорных точек пуст",
+    ):
+        extractor.run(show_progress=False)
